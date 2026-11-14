@@ -128,6 +128,14 @@ final class ComposerDictationBridge {
     /// the draft binding, which can lag the editor by an edit.
     var editorText: String? { textView?.string }
 
+    /// Replaces the attached editor's whole text, for a draft written from
+    /// outside the editor. Does nothing when no editor is attached; the next
+    /// editor starts from the draft binding. See
+    /// `ComposerNSTextView.replaceContents(with:)`.
+    func replaceEditorText(_ text: String) {
+        textView?.replaceContents(with: text)
+    }
+
     // MARK: Session
 
     /// Starts a session at the editor's selection. Returns false when there is

@@ -830,6 +830,37 @@ in the language-switcher note above.
   snapshots the row idle and responding at each width, and it now records
   every interruption's call stack for the report.
 
+Editor owns its text (2026-11-13). This replaces the stale-render rule from the
+second end-to-end round and its review fixes.
+
+- **What changed.** After it is created, `ComposerTextView` never takes its
+  text from a render. The draft binding is only where the editor publishes its
+  edits and what a newly created editor starts from (the reader panel shown
+  again, Agent Home rebuilt or docking). A write from outside the editor is an
+  explicit call: `ComposerNSTextView.replaceContents(with:)`, reached from the
+  surface through `ComposerDictationBridge.replaceEditorText(_:)`. It ends a
+  dictation session (reported on the next main-queue turn), sets the text,
+  drops undo history and the cached selection, and does not write the draft.
+  With no editor attached it does nothing. Text equal to the editor's changes
+  nothing.
+- **Writers.** `ChatSurfaceView.resetDraft()` (send, new conversation,
+  History in both placements, a scheduled run, a fresh-Home turn committing),
+  `completeMention`, and the fresh-Home commit closure in `sendDraft` each
+  write the draft and replace the editor's text. Nothing else writes the
+  draft.
+- **Selection.** A render still applies a selection the surface set (a
+  completed mention's caret), converted against the editor's text rather than
+  the render's draft, and only when it differs from the selection the editor
+  last published, so ordinary renders do not read the text storage.
+- **Why.** The old rule guessed by value and by time: it ignored a render
+  showing a text the editor had replaced and applied it after half a second
+  without a confirming render. Sent text could stay visible for that long, and
+  one end-to-end run in about twenty failed in a way consistent with the timer
+  firing on a busy machine and ending a session that had just started. The
+  editor now changes only from the user, the dictation bridge, and explicit
+  replacements, so there is nothing to guess. The timing tests were replaced
+  with tests of this contract.
+
 ### Phase 6 — Language setting, docs, release gate
 
 - (Done in Phase 5.) `RubienPreferences.assistantDictationLocaleIdentifier`

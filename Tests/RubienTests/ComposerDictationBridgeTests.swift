@@ -100,15 +100,18 @@ final class ComposerDictationBridgeTests: XCTestCase {
         /// Editor text at the moment each interruption was reported.
         var textAtInterruption: [String] = []
 
-        /// - Parameter selection: UTF-16 range; defaults to a caret at the end.
-        init(_ text: String = "", selection: NSRange? = nil) {
-            let draft = Draft(text: text)
-            let bridge = ComposerDictationBridge()
-            self.draft = draft
-            self.bridge = bridge
-            coordinator = ComposerTextView.Coordinator(ComposerTextView(
+        /// The representable as a render would build it. `shownText` and
+        /// `shownSelection` are what that render's bindings read, which can
+        /// lag the draft; writes always reach the draft.
+        private static func view(
+            of draft: Draft,
+            bridge: ComposerDictationBridge,
+            shownText: (() -> String)? = nil,
+            shownSelection: (() -> Range<Int>?)? = nil
+        ) -> ComposerTextView {
+            ComposerTextView(
                 text: Binding(
-                    get: { draft.text },
+                    get: { shownText?() ?? draft.text },
                     set: { new in
                         draft.edits.append((old: draft.text, new: new))
                         draft.text = new
@@ -116,14 +119,25 @@ final class ComposerDictationBridgeTests: XCTestCase {
                         draft.onNextEdit = nil
                         hook?()
                     }),
-                selection: Binding(get: { draft.selection }, set: { draft.selection = $0 }),
+                selection: Binding(
+                    get: { shownSelection.map { $0() } ?? draft.selection },
+                    set: { draft.selection = $0 }),
                 focusRequestCount: 0,
                 onCommandReturn: {},
                 onNavigationKey: { _ in false },
                 onAttachFiles: { _ in },
                 onAttachImageData: { _, _ in },
                 onDragTargeted: { _ in },
-                dictationBridge: bridge))
+                dictationBridge: bridge)
+        }
+
+        /// - Parameter selection: UTF-16 range; defaults to a caret at the end.
+        init(_ text: String = "", selection: NSRange? = nil) {
+            let draft = Draft(text: text)
+            let bridge = ComposerDictationBridge()
+            self.draft = draft
+            self.bridge = bridge
+            coordinator = ComposerTextView.Coordinator(Self.view(of: draft, bridge: bridge))
 
             textView.delegate = coordinator
             textView.string = text
@@ -142,6 +156,16 @@ final class ComposerDictationBridgeTests: XCTestCase {
 
         func type(_ text: String) {
             textView.insertText(text, replacementRange: textView.selectedRange())
+        }
+
+        /// Runs the coordinator's render path (what `updateNSView` does) with
+        /// bindings that read `text` and `selection`, whatever the draft holds.
+        func render(text: String, selection: Range<Int>?) {
+            coordinator.update(
+                from: Self.view(
+                    of: draft, bridge: bridge,
+                    shownText: { text }, shownSelection: { selection }),
+                textView: textView)
         }
 
         /// Runs work the editor scheduled on the main queue.
@@ -319,7 +343,8 @@ final class ComposerDictationBridgeTests: XCTestCase {
         XCTAssertTrue(editor.bridge.begin())
         editor.bridge.update(transcript: "hello")
 
-        editor.coordinator.syncExternalText("", into: editor.textView)
+        // What the surface does when send clears the draft.
+        editor.bridge.replaceEditorText("")
         XCTAssertFalse(editor.bridge.isActive)
         XCTAssertEqual(editor.string, "")
         XCTAssertFalse(editor.undoManager.canUndo)
@@ -327,7 +352,7 @@ final class ComposerDictationBridgeTests: XCTestCase {
         editor.bridge.update(transcript: "hello world")
         XCTAssertEqual(editor.string, "")
 
-        // Reported a turn later: the replacement runs inside a view update.
+        // Reported a turn later, to a receiver that may publish changes.
         XCTAssertTrue(editor.textAtInterruption.isEmpty)
         editor.drainMainQueue(for: 0.01)
         XCTAssertEqual(editor.textAtInterruption, [""])
@@ -372,169 +397,152 @@ final class ComposerDictationBridgeTests: XCTestCase {
         XCTAssertNil(editor.bridge.editorText)
     }
 
-    // MARK: Stale renders
+    // MARK: Renders and replacements
 
-    /// SwiftUI can re-render the editor once with the draft from before an edit
-    /// the editor just published (seen in Agent Home, whose draft is owned
-    /// several views up). That must not revert the edit or end dictation.
-    func testAStaleRenderOfThePreviousDraftIsNotAnOutsideWrite() {
-        let editor = Editor()
+    /// The editor owns its text. SwiftUI can render it with a draft from
+    /// before an edit it just published (seen in Agent Home, whose draft is
+    /// owned several views up), so no render's draft is applied: not an older
+    /// one, a newer one, or an empty one.
+    func testARenderNeverChangesTheEditorText() {
+        let editor = Editor("Note: ")
+        editor.type("a")
+        editor.endEvent()
         XCTAssertTrue(editor.bridge.begin())
         editor.bridge.update(transcript: "hello")
+        let edits = editor.draft.edits.count
+        XCTAssertEqual(editor.string, "Note: a hello")
 
-        editor.coordinator.staleRenderGrace = 0.05
-        editor.coordinator.syncExternalText("", into: editor.textView)
-        XCTAssertEqual(editor.string, "hello")
-        XCTAssertTrue(editor.bridge.isActive)
-
-        // The render with the new draft arrives; the echo was just an echo.
-        editor.coordinator.syncExternalText("hello", into: editor.textView)
-        editor.drainMainQueue(for: 0.15)
-        XCTAssertEqual(editor.string, "hello")
-        XCTAssertTrue(editor.bridge.isActive)
-        XCTAssertTrue(editor.textAtInterruption.isEmpty)
-
-        // After that confirmation the same text arriving again is an outside
-        // write and is applied at once.
-        editor.coordinator.syncExternalText("", into: editor.textView)
-        XCTAssertEqual(editor.string, "")
-        XCTAssertFalse(editor.bridge.isActive)
+        for shown in ["Note: a", "Note: ", "", "Note: a hello world", "unrelated"] {
+            editor.render(text: shown, selection: editor.draft.selection)
+            XCTAssertEqual(editor.string, "Note: a hello", "render showing \"\(shown)\"")
+            XCTAssertTrue(editor.bridge.isActive, "render showing \"\(shown)\"")
+            XCTAssertTrue(editor.undoManager.canUndo, "render showing \"\(shown)\"")
+        }
         editor.drainMainQueue(for: 0.01)
-        XCTAssertEqual(editor.textAtInterruption.count, 1)
-    }
-
-    /// A surface that re-renders per streaming tick keeps showing the same
-    /// unconfirmed draft; that must not postpone it indefinitely.
-    func testRepeatedSightingsOfAnUnconfirmedDraftKeepItsDeadline() {
-        let editor = Editor()
-        editor.coordinator.staleRenderGrace = 0.3
-        XCTAssertTrue(editor.bridge.begin())
-        editor.bridge.update(transcript: "hello")
-
-        XCTAssertFalse(editor.coordinator.syncExternalText("", into: editor.textView))
-        editor.drainMainQueue(for: 0.2)
-        XCTAssertFalse(editor.coordinator.syncExternalText("", into: editor.textView))
-        XCTAssertEqual(editor.string, "hello")
-        // Past the first sighting's deadline, short of a second one's.
-        editor.drainMainQueue(for: 0.2)
-        XCTAssertEqual(editor.string, "")
-        XCTAssertFalse(editor.bridge.isActive)
-    }
-
-    /// An edit after an unconfirmed draft was seen is newer than it, and the
-    /// binding already carries that edit.
-    func testAnEditAfterAnUnconfirmedDraftCancelsApplyingIt() {
-        let editor = Editor()
-        editor.coordinator.staleRenderGrace = 0.05
-        editor.type("a")
-        editor.coordinator.syncExternalText("", into: editor.textView)
-        editor.type("b")
-        editor.drainMainQueue(for: 0.15)
-        XCTAssertEqual(editor.string, "ab")
-        XCTAssertEqual(editor.draft.text, "ab")
-        XCTAssertTrue(editor.undoManager.canUndo)
-
-        // A later sighting starts a fresh check, still applied in time.
-        editor.coordinator.syncExternalText("", into: editor.textView)
-        XCTAssertEqual(editor.string, "ab")
-        editor.drainMainQueue(for: 0.15)
-        XCTAssertEqual(editor.string, "")
-    }
-
-    /// Sending clears the draft; a render still carrying the sent text must
-    /// not bring it back.
-    func testAStaleRenderAfterAProgrammaticReplaceIsNotApplied() {
-        let editor = Editor("sent text")
-        editor.coordinator.staleRenderGrace = 0.05
-        editor.coordinator.syncExternalText("", into: editor.textView)
-        XCTAssertEqual(editor.string, "")
-
-        XCTAssertFalse(editor.coordinator.syncExternalText("sent text", into: editor.textView))
-        XCTAssertTrue(editor.coordinator.syncExternalText("", into: editor.textView))
-        editor.drainMainQueue(for: 0.15)
-        XCTAssertEqual(editor.string, "")
-
-        // Once confirmed, the same text written again is an outside write.
-        XCTAssertTrue(editor.coordinator.syncExternalText("sent text", into: editor.textView))
-        XCTAssertEqual(editor.string, "sent text")
-    }
-
-    func testAnUnconfirmedReplaceStillYieldsToAnOutsideWriteAfterTheGracePeriod() {
-        let editor = Editor("sent text")
-        editor.coordinator.staleRenderGrace = 0.05
-        editor.coordinator.syncExternalText("", into: editor.textView)
-        editor.coordinator.syncExternalText("sent text", into: editor.textView)
-        XCTAssertEqual(editor.string, "")
-        editor.drainMainQueue(for: 0.15)
-        XCTAssertEqual(editor.string, "sent text")
-    }
-
-    /// A selection is measured in its render's text; applying it to the
-    /// editor's newer text would move the caret.
-    func testAStaleRenderLeavesTheSelectionAlone() {
-        let editor = Editor()
-        editor.coordinator.staleRenderGrace = 10
-        XCTAssertTrue(editor.bridge.begin())
-        editor.bridge.update(transcript: "hello world")
-        XCTAssertEqual(editor.textView.selectedRange(), NSRange(location: 11, length: 0))
-
-        editor.coordinator.syncExternalState(text: "", selection: 0..<0, into: editor.textView)
-        XCTAssertEqual(editor.string, "hello world")
-        XCTAssertEqual(editor.textView.selectedRange(), NSRange(location: 11, length: 0))
-
-        // A render with the editor's own text applies its selection.
-        editor.coordinator.syncExternalState(
-            text: "hello world", selection: 0..<5, into: editor.textView)
-        XCTAssertEqual(editor.textView.selectedRange(), NSRange(location: 0, length: 5))
-    }
-
-    /// Dictation keeps publishing while earlier echoes are still unresolved.
-    func testEchoesOfSeveralEditsInARowAllResolve() {
-        let editor = Editor()
-        editor.coordinator.staleRenderGrace = 0.05
-        XCTAssertTrue(editor.bridge.begin())
-        editor.bridge.update(transcript: "one")
-        editor.coordinator.syncExternalText("", into: editor.textView)
-        editor.bridge.update(transcript: "one two")
-        editor.coordinator.syncExternalText("one", into: editor.textView)
-        editor.bridge.update(transcript: "one two three")
-        editor.coordinator.syncExternalText("one two", into: editor.textView)
-        editor.coordinator.syncExternalText("one two three", into: editor.textView)
-
-        editor.drainMainQueue(for: 0.15)
-        XCTAssertEqual(editor.string, "one two three")
-        XCTAssertTrue(editor.bridge.isActive)
         XCTAssertTrue(editor.textAtInterruption.isEmpty)
+        XCTAssertEqual(editor.draft.edits.count, edits)
+
+        // Dictation carries on into the same text.
+        editor.bridge.update(transcript: "hello world")
+        XCTAssertEqual(editor.string, "Note: a hello world")
+        XCTAssertEqual(editor.draft.text, "Note: a hello world")
     }
 
-    /// An outside write can equal the previous draft (the draft is cleared
-    /// right after the first character). With no render confirming the
-    /// editor's text, it is applied once the grace period has passed.
-    func testAnOutsideWriteMatchingThePreviousDraftIsAppliedAfterTheGracePeriod() {
-        let editor = Editor()
-        editor.coordinator.staleRenderGrace = 0.05
-        editor.type("a")
-        editor.draft.text = ""
-        editor.coordinator.syncExternalText("", into: editor.textView)
-        XCTAssertEqual(editor.string, "a")
-
-        editor.drainMainQueue(for: 0.15)
-        XCTAssertEqual(editor.string, "")
-        XCTAssertFalse(editor.undoManager.canUndo)
-    }
-
-    func testStaleRendersDoNotDisturbTyping() {
+    func testRendersDoNotDisturbTyping() {
         let editor = Editor("x")
+        // Each render repeats the selection the editor published, with a
+        // draft that is older, current, or empty.
         editor.type("y")
+        editor.render(text: "x", selection: editor.draft.selection)
         editor.type("z")
-        editor.coordinator.staleRenderGrace = 0.05
-        editor.coordinator.syncExternalText("xy", into: editor.textView)
-        editor.coordinator.syncExternalText("x", into: editor.textView)
-        editor.coordinator.syncExternalText("xyz", into: editor.textView)
-        editor.drainMainQueue(for: 0.15)
+        editor.render(text: "xy", selection: editor.draft.selection)
+        editor.render(text: "", selection: editor.draft.selection)
+        editor.render(text: "xyz", selection: editor.draft.selection)
         XCTAssertEqual(editor.string, "xyz")
         XCTAssertEqual(editor.draft.text, "xyz")
         XCTAssertTrue(editor.undoManager.canUndo)
+    }
+
+    func testReplacingTheContentsReplacesTheTextWithoutWritingTheDraft() {
+        let editor = Editor("abc")
+        editor.type("d")
+        editor.endEvent()
+        XCTAssertTrue(editor.undoManager.canUndo)
+        XCTAssertTrue(editor.bridge.begin())
+        editor.bridge.update(transcript: "hello")
+        let draftBefore = editor.draft.text
+        let edits = editor.draft.edits.count
+
+        editor.textView.replaceContents(with: "new text")
+        XCTAssertEqual(editor.string, "new text")
+        XCTAssertFalse(editor.bridge.isActive)
+        XCTAssertFalse(editor.undoManager.canUndo)
+        // The caller writes the draft itself.
+        XCTAssertEqual(editor.draft.text, draftBefore)
+        XCTAssertEqual(editor.draft.edits.count, edits)
+
+        // The interruption is reported on the next main-queue turn.
+        XCTAssertTrue(editor.textAtInterruption.isEmpty)
+        editor.drainMainQueue(for: 0.01)
+        XCTAssertEqual(editor.textAtInterruption, ["new text"])
+
+        // A render still showing the old draft leaves the new text alone.
+        editor.render(text: draftBefore, selection: nil)
+        XCTAssertEqual(editor.string, "new text")
+    }
+
+    func testReplacingTheContentsWithTheSameTextChangesNothing() {
+        let editor = Editor("abc")
+        editor.type("d")
+        editor.endEvent()
+        XCTAssertTrue(editor.bridge.begin())
+
+        editor.bridge.replaceEditorText("abcd")
+        XCTAssertEqual(editor.string, "abcd")
+        XCTAssertTrue(editor.bridge.isActive)
+        XCTAssertTrue(editor.undoManager.canUndo)
+    }
+
+    func testReplacingThroughTheBridgeNeedsAnAttachedEditor() {
+        let unattached = ComposerDictationBridge()
+        unattached.replaceEditorText("text")
+        XCTAssertNil(unattached.editorText)
+
+        let editor = Editor("abc")
+        editor.bridge.replaceEditorText("xyz")
+        XCTAssertEqual(editor.string, "xyz")
+        XCTAssertEqual(editor.draft.text, "abc")
+
+        editor.textView.dictationBridge = nil
+        editor.bridge.replaceEditorText("")
+        XCTAssertEqual(editor.string, "xyz")
+    }
+
+    /// A selection the surface sets lands in the editor's text, also when the
+    /// render's draft is stale. Emoji take two UTF-16 units per character.
+    func testASelectionIsMeasuredInTheEditorText() {
+        let editor = Editor("👍👍cd")
+        editor.render(text: "abcdef", selection: 2..<2)
+        XCTAssertEqual(editor.textView.selectedRange(), NSRange(location: 4, length: 0))
+
+        // Han characters before the caret, against a stale draft too short
+        // to hold the offset.
+        let han = Editor("你好👍abc")
+        han.render(text: "你好", selection: 3..<4)
+        XCTAssertEqual(han.textView.selectedRange(), NSRange(location: 4, length: 1))
+    }
+
+    /// What completing a mention does: the editor gets the completed text,
+    /// then the caret is set; the render that carries the caret can still
+    /// show the draft from before the completion.
+    func testACaretSetAfterAReplacementLandsInTheNewText() {
+        let token = PaperMentions.token(for: paper)
+        let editor = Editor("见 @att")
+        let completed = "见 \(token) "
+        editor.bridge.replaceEditorText(completed)
+        editor.draft.text = completed
+        let caret = completed.count
+        editor.render(text: "见 @att", selection: caret..<caret)
+        XCTAssertEqual(
+            editor.textView.selectedRange(),
+            NSRange(location: (completed as NSString).length, length: 0))
+
+        // The same offset set again after another replacement still applies.
+        editor.bridge.replaceEditorText("见 " + completed)
+        editor.render(text: completed, selection: caret..<caret)
+        XCTAssertEqual(editor.textView.selectedRange(), NSRange(location: caret, length: 0))
+    }
+
+    /// A render repeating the selection the editor published does nothing,
+    /// even with a stale draft.
+    func testARenderRepeatingThePublishedSelectionLeavesTheCaret() {
+        let editor = Editor("abc")
+        editor.textView.setSelectedRange(NSRange(location: 1, length: 0))
+        XCTAssertEqual(editor.draft.selection, 1..<1)
+        editor.render(text: "", selection: 1..<1)
+        XCTAssertEqual(editor.textView.selectedRange(), NSRange(location: 1, length: 0))
+        editor.render(text: "", selection: nil)
+        XCTAssertEqual(editor.textView.selectedRange(), NSRange(location: 1, length: 0))
     }
 
     func testRemovingTheBridgeFromTheEditorEndsTheSession() {

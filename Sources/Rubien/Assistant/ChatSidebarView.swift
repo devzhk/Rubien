@@ -1784,11 +1784,14 @@ struct ChatSurfaceView: View {
             // clears the committed text while preserving any later edit. A
             // queued send commits before returning, while the binding may still
             // lag the editor, so the editor is asked first while it is attached.
+            // With the Home subtree gone the bridge has no editor, and the next
+            // editor starts from the cleared binding.
             let externalDraft = $draft
             let bridge = dictationBridge
             session.send(text, mentionedReferences: mentions) {
                 if (bridge.editorText ?? externalDraft.wrappedValue) == text {
                     externalDraft.wrappedValue = ""
+                    bridge.replaceEditorText("")
                 }
             }
         } else {
@@ -1975,6 +1978,10 @@ struct ChatSurfaceView: View {
         reconciledDraft = completed.text
         mentionsReconciledDraft = completed.text
         draft = completed.text
+        dictationBridge.replaceEditorText(completed.text)
+        // Set after the replacement, which can publish the editor's own
+        // selection. The next render converts this caret against the editor's
+        // text.
         draftSelection = completed.caretOffset..<completed.caretOffset
         editorFocusRequests += 1
     }
@@ -2019,7 +2026,10 @@ struct ChatSurfaceView: View {
         mentionSearchInProgress = false
     }
 
+    /// Every write of the draft from here also replaces the editor's text: the
+    /// editor owns its text and never takes it from a render.
     private func resetDraft() {
+        dictationBridge.replaceEditorText("")
         draftSelection = nil
         draft = ""
         selectedMentions = []
