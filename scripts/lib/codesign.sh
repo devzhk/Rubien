@@ -9,6 +9,9 @@
 # identifier claimed in the entitlements plists.
 RUBIEN_APP_GROUP_ID="9TXK4V3SS8.group.com.rubien.shared"
 
+# Hardened Runtime silently denies microphone input without this entitlement.
+RUBIEN_AUDIO_INPUT_ENTITLEMENT="com.apple.security.device.audio-input"
+
 # Sign a single binary, optionally with entitlements.
 #   $1  path to binary
 #   $2  (optional) path to entitlements plist
@@ -42,6 +45,31 @@ rubien_require_entitlement() {
         echo "   ✓ $label present on $(basename "$target")"
     else
         echo "   ✗ $label MISSING on $target${hint:+ — $hint}" >&2
+        exit 1
+    fi
+}
+
+# Assert that a Boolean entitlement is signed as true on the target. The grep in
+# rubien_require_entitlement would also accept a key that is present but false.
+#   $1  path to signed binary/bundle
+#   $2  entitlement key
+#   $3  human-readable label
+#   $4  (optional) extra explanation printed on failure
+rubien_require_true_entitlement() {
+    local target="$1"
+    local key="$2"
+    local label="$3"
+    local hint="${4:-}"
+    local value
+    # plutil key paths split on dots, so the key's own dots are escaped.
+    # -expect bool rejects <string>true</string>, which prints the same text.
+    value="$(codesign -d --entitlements - --xml "$target" 2>/dev/null \
+        | /usr/bin/plutil -extract "${key//./\\.}" raw -expect bool -o - - 2>/dev/null \
+        || true)"
+    if [ "$value" = "true" ]; then
+        echo "   ✓ $label enabled on $(basename "$target")"
+    else
+        echo "   ✗ $label NOT enabled on $target${hint:+ — $hint}" >&2
         exit 1
     fi
 }

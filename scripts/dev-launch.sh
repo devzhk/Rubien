@@ -126,6 +126,10 @@ if [ -f "$APP_BUNDLE/Contents/Helpers/rubien-browser-host" ]; then
         "App Group" \
         "rubien-browser-host will hit unsandboxed DB, not the shared one"
 fi
+rubien_require_true_entitlement "$APP_BUNDLE" \
+    "$RUBIEN_AUDIO_INPUT_ENTITLEMENT" \
+    "Microphone input" \
+    "signed release builds would deny the microphone"
 
 echo "▸ Launching..."
 open "$APP_BUNDLE"

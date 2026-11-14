@@ -31,6 +31,8 @@ cd "$PROJECT_DIR"
 
 # shellcheck source=lib/codesign.sh
 source "$SCRIPT_DIR/lib/codesign.sh"
+# shellcheck source=lib/privacy-usage.sh
+source "$SCRIPT_DIR/lib/privacy-usage.sh"
 
 DERIVED_DATA="$PROJECT_DIR/.xcodebuild"
 PRODUCTS_DIR="$DERIVED_DATA/Build/Products/$CONFIGURATION"
@@ -160,7 +162,21 @@ assemble_app_bundle() {
     stamp_info_plist_version
     stamp_deep_link_info_plist
     stamp_sparkle_info_plist
+    rubien_stamp_privacy_usage "$APP_BUNDLE/Contents/Info.plist"
     embed_legal_files
+}
+
+# Checks the finished bundle, so a later step that rewrites Info.plist or the
+# signature cannot drop a dictation requirement unnoticed.
+verify_dictation_declarations() {
+    echo "▸ Verifying dictation declarations..."
+    rubien_require_privacy_usage "$APP_BUNDLE/Contents/Info.plist"
+    if [ "$CODESIGN_ENABLED" != "0" ]; then
+        rubien_require_true_entitlement "$APP_BUNDLE" \
+            "$RUBIEN_AUDIO_INPUT_ENTITLEMENT" \
+            "Microphone input" \
+            "Hardened Runtime will deny the microphone"
+    fi
 }
 
 embed_legal_files() {
@@ -690,6 +706,7 @@ embed_provisioning_profile
 thin_sparkle_for_release
 prepare_release_artifacts
 sign_bundle
+verify_dictation_declarations
 create_dmg
 "$SCRIPT_DIR/package-browser-extension.sh" "$VERSION" "$OUTPUT_DIR"
 

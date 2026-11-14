@@ -14,6 +14,8 @@ fi
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
+# shellcheck source=lib/privacy-usage.sh
+source "$PROJECT_DIR/scripts/lib/privacy-usage.sh"
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
 
@@ -79,6 +81,7 @@ info = {
 with (Path(sys.argv[1]) / "Contents/Info.plist").open("wb") as stream:
     plistlib.dump(info, stream)
 PY
+rubien_stamp_privacy_usage "$STAGED_APP/Contents/Info.plist"
 
 xattr -cr "$STAGED_APP"
 codesign --force --sign - "$STAGED_APP/Contents/Helpers/rubien-cli"
@@ -90,6 +93,7 @@ python3 "$PROJECT_DIR/scripts/verify-macos-sdk.py" "$STAGED_APP/Contents/MacOS/R
 # Only this generated preview bundle is replaced. Its sibling library survives.
 rm -rf "$APP_BUNDLE"
 mv "$STAGED_APP" "$APP_BUNDLE"
+rubien_require_privacy_usage "$APP_BUNDLE/Contents/Info.plist"
 echo "Preview: $APP_BUNDLE"
 if [[ "${1:-}" != "--no-launch" ]]; then
     open --env RUBIEN_LIBRARY_ROOT="$PREVIEW_DIR/Library" "$APP_BUNDLE"
