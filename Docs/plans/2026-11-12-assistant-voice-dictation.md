@@ -409,6 +409,59 @@ Phase 6.
 - Tests never open the microphone; CI has no audio hardware and a permission
   prompt would hang the suite.
 
+#### Phase 4 status (2026-11-13)
+
+Implemented in `DictationAudioSource.swift` (the protocol and
+`FileDictationAudioSource`), `MicrophoneCapture.swift`,
+`AnalyzerTranscriptAccumulator.swift`, `AnalyzerDictationEngine.swift` (with
+`AnalyzerAudioConverter`), `SystemDictationAuthorizer.swift`, and
+`DictationEngines.swift`. Nothing in the UI uses them yet.
+
+Decisions and findings:
+
+- **`SpeechTranscriber` needs `fastResults`.** With `volatileResults` alone it
+  held every result until the speaker paused: a paced test got no text at all
+  while speech was still arriving, and a probe with trailing silence got the
+  whole sentence in one burst after the pause. With `fastResults`, partial
+  text arrives about once a second while speaking. `DictationTranscriber`
+  streams with `volatileResults` alone.
+- **Sources start synchronously** on the main actor and are used once. The
+  configuration-change handler only ends the stream with `noMicrophone`; no
+  new failure case was added.
+- **The transcript stream keeps only the newest element**, since each element
+  is the whole transcript. A finished stream still hands out what it had
+  queued, so at most one transcript can arrive after `cancel`; the controller
+  already drops it.
+- **The accumulator follows Apple's sample**: final text appends, volatile
+  text replaces the tail. Time ranges are not used, so out-of-order or
+  duplicate results (listed above) are not handled; none were seen.
+- **`prepare` also loads the model**: it reserves the locale, installs assets,
+  asks for the audio format, then creates the analyzer and calls
+  `prepareToAnalyze`.
+- **Locale reservations.** If the locale is not reserved and all
+  `maximumReservedLocales` slots are taken, the first reserved locale is
+  released before reserving. Rubien dictates in one language at a time, so
+  other reservations are left over from earlier settings.
+
+Verified: deterministic tests for the accumulator, the file source, buffer
+copying, and converter resampling (48 kHz stereo to 16 kHz mono with no lost
+frames). Opt-in live tests (`RUBIEN_DICTATION_LIVE_TESTS=1`) ran on this Mac
+with both transcribers on the checked-in fixture, and passed three times in a
+row. Both transcribers produce the sentence; `DictationTranscriber` adds no
+punctuation to the synthetic voice. Partial text arrives while the paced file
+is still playing, and the stream ends well under a millisecond after `cancel`.
+The new files compile with no diagnostics against the macOS 26.5 SDK in the
+Command Line Tools. That check used `swift build --build-system native --sdk`
+because the default build system ignored both `SDKROOT` and `--sdk`. The
+product link did not finish: the `#Preview` macro plugin is missing with that
+SDK (`AssistantRendererHarness.swift`).
+
+Not verified: `MicrophoneCapture` and `SystemDictationAuthorizer` at run time
+(left for the Phase 5 manual check), the model download and its progress (the
+en_US model was already installed), release of a reserved locale, device
+change during capture, and the test files against the 26.5 SDK. The live tests
+reserve en_US for the test runner's identity.
+
 ### Phase 5 — Button and surface integration (first end-to-end build)
 
 - `ComposerDictationButton`, the control-row line, freeze hooks in
