@@ -351,21 +351,61 @@ Carried into Phase 5:
 
 ### Phase 3 — Controller and contracts, no audio
 
-- `DictationEngine`, `DictationUpdate`, `AudioSource`, authorizer protocol,
-  `DictationController` with freeze/finish, generations, owner scoping,
-  silence timeout with an injected clock.
+- `DictationEngine`, authorizer protocol, `DictationController` with
+  freeze/finish, session identity as the generation, owner scoping, silence
+  timeout with injected time.
 - Tests with fakes: state transitions, each permission outcome, cancellation
   during a pending prompt or download, handoff before the previous engine has
   finished cleanup, late results dropped after freeze, finish deadline.
 
-### Phase 4 — Capture and the legacy backend
+#### Phase 3 status (2026-11-13)
 
-- `MicrophoneCapture`, file-backed `AudioSource`, legacy accumulator,
-  `LegacySpeechDictationEngine`.
-- Deterministic accumulator tests: revised partials, final result, error,
-  duplicate completion.
+Implemented in `DictationEngine.swift` and `DictationController.swift` with 23
+tests against fake engines, a fake authorizer, and manually fired sleeps.
+Differences from the sketch above:
+
+- The engine stream carries the whole transcript as a `String`; the controller
+  has no use for a separate finalized/volatile split.
+- A session object doubles as its own generation: asynchronous work continues
+  only while its session is still the current one.
+- The audio-source protocol moved to Phase 4, where it is first used.
+- The editor is claimed before the microphone opens, so a composer that cannot
+  take text never starts a recording.
+
+#### Scope change (2026-11-13): macOS 26 or later for the first version
+
+The developer handed over ownership of the feature at this point, with the
+instruction to finish and verify it end to end without further check-ins.
+
+The `SFSpeechRecognizer` backend is deferred, so dictation needs macOS 26.
+On older systems the button is not shown. Reasons:
+
+- It cannot be verified here. This Mac runs macOS 27, where the analyzer
+  engines always win, and the older recognizer's behavior differs by OS
+  version (how partial results restart after a pause, the Siri/Dictation
+  dependency, the one-minute limit).
+- Testing it at all needs a speech-recognition permission prompt, and its
+  failure mode is duplicated or lost text in a user's draft.
+- The engine protocol and factory leave a clean slot for it once it can be
+  tested on macOS 14 or 15.
+
+The speech-recognition usage string from Phase 1 stays in the bundle, unused
+for now. Old Phases 4 and 6 merge into the new Phase 4; old Phase 7 becomes
+Phase 6.
+
+### Phase 4 — Capture and the analyzer engines
+
+- `DictationAudioSource` with `MicrophoneCapture` and a file-backed source.
+- `AnalyzerDictationEngine` for `SpeechTranscriber` and `DictationTranscriber`,
+  engine selection, model download, the system authorizer.
+- A pure accumulator that turns time-ranged analyzer results into a transcript,
+  with deterministic tests: multiple finalized segments, volatile revision,
+  out-of-order and duplicate results.
+- Uses only macOS 26 symbols. Type-check against the macOS 26.5 SDK that the
+  Command Line Tools install, which is what CI compiles with.
 - Opt-in live test (environment-gated like `RUBIEN_LIVE_TESTS`): a short
-  checked-in WAV through the production adapter via the file source.
+  checked-in WAV through the production engine via the file source. The test
+  must finish the analyzer explicitly.
 - Tests never open the microphone; CI has no audio hardware and a permission
   prompt would hang the suite.
 
@@ -381,17 +421,7 @@ Carried into Phase 5:
   window while listening, unplugging the microphone, Siri and Dictation
   turned off.
 
-### Phase 6 — Analyzer backends on macOS 26+
-
-- Analyzer accumulator, `AnalyzerDictationEngine` for `SpeechTranscriber` and
-  `DictationTranscriber`, backend selection, asset states, locale reservation.
-- Uses only macOS 26 symbols; confirm on CI's SDK.
-- Deterministic accumulator tests: multiple finalized segments, volatile
-  revision, error, duplicate completion.
-- Opt-in live WAV test through the production adapter; the test must finish
-  the analyzer explicitly, because the file initializer does not by default.
-
-### Phase 7 — Language setting, docs, release gate
+### Phase 6 — Language setting, docs, release gate
 
 - `RubienPreferences.assistantDictationLocale` with a `@State` mirror in
   `RubienSettingsView`; picker lists "System language" plus supported locales.
@@ -407,21 +437,17 @@ Carried into Phase 5:
 
 Optional experiment, separate from completion: recognition hints from the open
 paper. Limit to short phrases (author surnames, key terms; at most 100), and
-only for `DictationTranscriber` and the legacy backend, where hints are
-documented. Keep only if a before/after check shows a benefit.
+only for `DictationTranscriber`, where hints are documented. Keep only if a
+before/after check shows a benefit.
 
 ## Still unverified
 
 - Agent microphone inheritance inside Rubien's real bundle and provider
   invocations (confirmed with a stand-in app in Phase 1; repeat in Phase 5).
 - Codex's read-only sandbox mode (only workspace-write was tested).
-- Legacy on-device recognition with Siri and Dictation off, per macOS version.
-- Whether on-device legacy sessions are subject to the documented one-minute
-  limit.
 - Permission continuity across a Sparkle update.
 - Device removal, Bluetooth profile switching, and model download behavior in
   practice.
-- Compilation against the CI SDK; only SDK 27.0 is installed locally.
 
 ## Other risks
 
@@ -434,6 +460,8 @@ documented. Keep only if a before/after check shows a benefit.
 
 ## Deferred
 
+- An `SFSpeechRecognizer` backend for macOS 14.4 through 15 (see the scope
+  change under Phase 3).
 - Whisper as an optional downloadable engine (mixed-language dictation).
 - A keyboard shortcut and push-to-talk.
 - Quick language switch from the button's context menu.
