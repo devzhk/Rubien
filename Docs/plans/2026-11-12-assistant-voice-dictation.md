@@ -17,11 +17,12 @@ local `main` on 2026-11-13, the Command-D shortcut included. Not pushed and
 not released. The status subsections under each phase below have the detail;
 this is the summary.
 
-On the branch and not yet in `main`: the language menu beside the microphone,
-the grouped voice tile with the 460-point default panel width, and the change
-that lets the composer editor own its text (with the rebuilt-editor and undo
-fixes that came out of its review). See the notes "Language switcher", "Voice
-tile and sidebar width", and "Editor owns its text" under Phase 5.
+Fast-forwarded into local `main` again on 2026-11-14 at the developer's
+request: the language menu beside the microphone, the grouped voice tile with
+the 460-point default panel width, and the change that lets the composer
+editor own its text (with the rebuilt-editor and undo fixes that came out of
+its review). See the notes "Language switcher", "Voice tile and sidebar
+width", and "Editor owns its text" under Phase 5.
 
 Works, verified by driving the real UI in the preview app with recorded audio
 (`DictationSelfTest`, see "Orchestrator review and end-to-end check of
