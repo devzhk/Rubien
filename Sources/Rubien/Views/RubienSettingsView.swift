@@ -39,8 +39,11 @@ struct RubienSettingsView: View {
     @State private var defaultWebAccess = true
     @State private var defaultAutoApprove = false
     @State private var defaultLoadUserTools = false
-    /// "" ⇒ the system language.
-    @State private var dictationLocaleIdentifier = ""
+    /// The dictation-language preference's own storage ("" or unset ⇒ the
+    /// system language), observed so this picker and the composer's language
+    /// menu always agree. Choices are written through `DictationLanguage.choose`.
+    @AppStorage(RubienPreferences.assistantDictationLocaleIdentifierKey)
+    private var dictationLocaleIdentifier = ""
     @State private var dictationSupportedLocales: [Locale] = []
     @State private var codexRuntimeMetrics =
         CodexRuntimeMetricsStore.shared.snapshot()
@@ -497,7 +500,6 @@ struct RubienSettingsView: View {
             readerPrompt = RubienPreferences.assistantReaderPromptOverride
                 ?? AssistantContext.defaultPrompt(for: .reader)
             seedModelEffortMirrors(for: defaultProvider)
-            dictationLocaleIdentifier = RubienPreferences.assistantDictationLocaleIdentifier ?? ""
             if DictationEngines.isSupported {
                 dictationSupportedLocales = await DictationEngines.supportedLocales()
             }
@@ -531,9 +533,6 @@ struct RubienSettingsView: View {
         .onChange(of: defaultAutoApprove) { _, value in RubienPreferences.assistantAutoApprove = value }
         .onChange(of: defaultLoadUserTools) { _, value in
             RubienPreferences.assistantLoadUserTools = value
-        }
-        .onChange(of: dictationLocaleIdentifier) { _, value in
-            RubienPreferences.assistantDictationLocaleIdentifier = value.isEmpty ? nil : value
         }
         .onChange(of: libraryPrompt) { _, _ in
             schedulePromptSave()
@@ -881,7 +880,9 @@ struct RubienSettingsView: View {
 
     private var assistantDictationSection: some View {
         Section {
-            Picker(selection: $dictationLocaleIdentifier) {
+            Picker(selection: Binding(
+                get: { dictationLocaleIdentifier },
+                set: { DictationLanguage.choose($0.isEmpty ? nil : $0) })) {
                 Text(String(localized: "System language", bundle: .module)).tag("")
                 // Lists the chosen language even before the supported list loads,
                 // or after it stops being supported, so the picker always shows it.

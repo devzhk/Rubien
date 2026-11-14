@@ -160,6 +160,7 @@ struct ChatSurfaceView: View {
     @ObservedObject private var dictation = DictationController.shared
     @State private var dictationOwner = DictationController.Owner()
     @State private var dictationBridge = ComposerDictationBridge()
+    @State private var dictationLanguages = DictationLanguageLists()
     /// Draft and selection are separate SwiftUI bindings and can publish in
     /// either order. Coalesce them before converting offsets to String.Index.
     @State private var mentionRefreshTask: Task<Void, Never>?
@@ -1083,16 +1084,26 @@ struct ChatSurfaceView: View {
             composerEditor
             HStack(spacing: 8) {
                 plusMenu
-                approvalPicker
-                Spacer()
-                providerPicker
-                modelPicker
+                // The menus' labels shorten as the row narrows: the first layout
+                // whose labels fit is used (see `ControlRowDensity`). The buttons
+                // never change, so they stay outside and exist once.
+                ViewThatFits(in: .horizontal) {
+                    controlRowMenus(.full)
+                    controlRowMenus(.modelWithoutEffort)
+                    controlRowMenus(.approvalIconOnly)
+                    controlRowMenus(.languageCodeOnly)
+                    controlRowMenus(.withoutChevrons)
+                }
                 ComposerDictationButton(
                     controller: dictation,
                     owner: dictationOwner,
                     bridge: dictationBridge,
                     toggle: { _ = toggleDictation() })
                 composerButton
+            }
+            .task {
+                guard DictationEngines.isSupported, !dictationLanguages.isLoaded else { return }
+                dictationLanguages = await DictationLanguageLists.load()
             }
         }
         .padding(10)
@@ -1304,13 +1315,59 @@ struct ChatSurfaceView: View {
         session.stageAttachments(panel.urls)
     }
 
+    // MARK: Control row layouts
+
+    /// How much of the control row's menu labels is shown, most complete first.
+    /// Each step keeps every earlier step's shortening. Only labels change; every
+    /// menu and its contents stay. At the sidebar's minimum width the worst case
+    /// (Codex, a long model name, Agent approvals, responding) needs the last one.
+    private enum ControlRowDensity: Int, Comparable {
+        case full
+        /// The model picker drops its effort word.
+        case modelWithoutEffort
+        /// The approval picker drops its word ("Ask", "Auto", "Agent").
+        case approvalIconOnly
+        /// The language menu drops its chevron.
+        case languageCodeOnly
+        /// The approval, provider, and model pickers drop their chevrons.
+        case withoutChevrons
+
+        static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
+
+    /// The control row between "+" and the microphone, at one density.
+    private func controlRowMenus(_ density: ControlRowDensity) -> some View {
+        HStack(spacing: 8) {
+            approvalPicker(density)
+            // No minimum, so a tight row spends this gap before shortening labels.
+            Spacer(minLength: 0)
+            providerPicker(density)
+            modelPicker(density)
+            ComposerDictationLanguageMenu(
+                controller: dictation,
+                owner: dictationOwner,
+                languages: dictationLanguages,
+                showsChevron: density < .languageCodeOnly,
+                fontSize: ChatSurfaceTypography.controlFontSize)
+        }
+    }
+
+    /// The small gray chevron after a picker's label, or nothing at `density`.
+    private func pickerChevron(_ density: ControlRowDensity) -> Text {
+        guard density < .withoutChevrons else { return Text(verbatim: "") }
+        return Text(" ")
+            + Text(Image(systemName: "chevron.down"))
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+    }
+
     // MARK: Approval mode switch (Ask ⟷ Auto)
 
     /// Whether approval requests become native cards or run automatically. In the
     /// isolated posture this is Ask vs Auto; with the full user environment, the
     /// agent's own permissions apply first and Rubien can card only requests the
     /// provider actually emits. Reads/search are silent either way.
-    private var approvalPicker: some View {
+    private func approvalPicker(_ density: ControlRowDensity) -> some View {
         Menu {
             Picker("Approvals", selection: $session.autoApprove) {
                 if session.loadUserTools {
@@ -1322,7 +1379,7 @@ struct ChatSurfaceView: View {
             }
             .pickerStyle(.inline)
         } label: {
-            approvalPickerText
+            approvalPickerText(density)
                 .padding(.horizontal, 6)
                 .frame(height: 24)
                 .contentShape(Rectangle())
@@ -1341,16 +1398,15 @@ struct ChatSurfaceView: View {
               : "Approvals — Ask shows a card before writes/shell; Auto runs them automatically")
     }
 
-    private var approvalPickerText: Text {
+    private func approvalPickerText(_ density: ControlRowDensity) -> Text {
         let icon = session.autoApprove ? "bolt.fill" : "hand.raised"
         let word = session.autoApprove ? "Auto" : (session.loadUserTools ? "Agent" : "Ask")
         let tint: Color = session.autoApprove ? .orange : Color.primary.opacity(0.80)
-        return ((Text(Image(systemName: icon)) + Text(" \(word)"))
-            .foregroundStyle(tint)
-            + Text(" ")
-            + Text(Image(systemName: "chevron.down"))
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.secondary))
+        var text = Text(Image(systemName: icon))
+        if density < .approvalIconOnly {
+            text = text + Text(" \(word)")
+        }
+        return (text.foregroundStyle(tint) + pickerChevron(density))
             .font(.system(size: ChatSurfaceTypography.controlFontSize))
     }
 
@@ -1360,7 +1416,7 @@ struct ChatSurfaceView: View {
     /// down the current runtime and starts a fresh conversation on the other (model /
     /// effort / sandbox are backend-specific, so they re-seed). Disabled mid-turn so a
     /// switch can't yank a streaming response.
-    private var providerPicker: some View {
+    private func providerPicker(_ density: ControlRowDensity) -> some View {
         Menu {
             Picker("Backend", selection: Binding(
                 get: { session.providerKind },
@@ -1370,7 +1426,7 @@ struct ChatSurfaceView: View {
             }
             .pickerStyle(.inline)
         } label: {
-            providerPickerText
+            providerPickerText(density)
                 .padding(.horizontal, 6)
                 .frame(height: 24)
                 .contentShape(Rectangle())
@@ -1391,13 +1447,10 @@ struct ChatSurfaceView: View {
         .help("Backend for this conversation — switching starts a new conversation on the other runtime")
     }
 
-    private var providerPickerText: Text {
+    private func providerPickerText(_ density: ControlRowDensity) -> Text {
         (Text(session.providerKind.displayName)
             .foregroundStyle(Color.primary.opacity(0.80))
-            + Text(" ")
-            + Text(Image(systemName: "chevron.down"))
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.secondary))
+            + pickerChevron(density))
             .font(.system(size: ChatSurfaceTypography.controlFontSize))
     }
 
@@ -1431,7 +1484,7 @@ struct ChatSurfaceView: View {
         }
     }
 
-    private var modelPicker: some View {
+    private func modelPicker(_ density: ControlRowDensity) -> some View {
         Menu {
             if session.providerKind == .codex, session.codexModels.isEmpty {
                 Text(session.isLoadingCodexModels ? "Loading models…" : "Model list unavailable")
@@ -1457,7 +1510,7 @@ struct ChatSurfaceView: View {
             // not render reliably under .borderlessButton on macOS — segments get
             // stacked/dropped. Concatenation guarantees a single side-by-side line
             // and gives the reference's two-tone look (bold model, gray effort).
-            modelPickerText
+            modelPickerText(density)
                 .padding(.horizontal, 6)
                 .frame(height: 24)
                 .contentShape(Rectangle())
@@ -1493,18 +1546,15 @@ struct ChatSurfaceView: View {
     }
 
     /// "Opus High ˅" as one concatenated Text (dark model · gray effort · chevron),
-    /// regular weight — the reference's two-tone look.
-    private var modelPickerText: Text {
+    /// regular weight — the reference's two-tone look. A narrow row drops the
+    /// effort word, then the chevron.
+    private func modelPickerText(_ density: ControlRowDensity) -> Text {
         var text = Text(modelLabel)
             .foregroundStyle(Color.primary.opacity(0.80))
-        if let effortLabel {
+        if density < .modelWithoutEffort, let effortLabel {
             text = text + Text(" \(effortLabel)").foregroundStyle(.secondary)
         }
-        text = text
-            + Text(" ")
-            + Text(Image(systemName: "chevron.down"))
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.secondary)
+        text = text + pickerChevron(density)
         return text.font(.system(size: ChatSurfaceTypography.controlFontSize))
     }
 

@@ -39,6 +39,8 @@ final class RubienPreferencesTests: XCTestCase {
             RubienPreferences.webReaderSidebarVisibleKey,
             RubienPreferences.webReaderSidebarWidthKey,
             RubienPreferences.readerSidebarPersistenceVersionKey,
+            RubienPreferences.assistantDictationLocaleIdentifierKey,
+            RubienPreferences.assistantDictationRecentLocaleIdentifiersKey,
         ]
     }
 
@@ -327,6 +329,45 @@ final class RubienPreferencesTests: XCTestCase {
         RubienPreferences.webReaderSidebarWidth = 290
         RubienPreferences.migrateReaderSidebarPreferencesIfNeeded()
         XCTAssertEqual(RubienPreferences.webReaderSidebarWidth, 290)
+    }
+
+    // MARK: - Dictation languages
+
+    func testDictationRecentLanguagesDefaultToEmptyAndRoundTrip() {
+        XCTAssertEqual(RubienPreferences.assistantDictationRecentLocaleIdentifiers, [])
+
+        RubienPreferences.assistantDictationRecentLocaleIdentifiers = ["zh-CN", "en-US"]
+        XCTAssertEqual(RubienPreferences.assistantDictationRecentLocaleIdentifiers, ["zh-CN", "en-US"])
+        XCTAssertEqual(
+            UserDefaults.standard.stringArray(
+                forKey: RubienPreferences.assistantDictationRecentLocaleIdentifiersKey),
+            ["zh-CN", "en-US"])
+
+        RubienPreferences.assistantDictationRecentLocaleIdentifiers = []
+        XCTAssertNil(UserDefaults.standard.object(
+            forKey: RubienPreferences.assistantDictationRecentLocaleIdentifiersKey))
+    }
+
+    func testDictationRecentLanguagesDropBlanksRepeatsAndExtras() {
+        UserDefaults.standard.set(
+            ["en-US", "", "zh-CN", "en-US", "ja-JP", "de-DE", "fr-FR"],
+            forKey: RubienPreferences.assistantDictationRecentLocaleIdentifiersKey)
+        XCTAssertEqual(
+            RubienPreferences.assistantDictationRecentLocaleIdentifiers,
+            ["en-US", "zh-CN", "ja-JP", "de-DE"])
+    }
+
+    func testChoosingADictationLanguageRecordsItAsRecent() {
+        DictationLanguage.choose("zh-CN")
+        DictationLanguage.choose("en-US")
+        XCTAssertEqual(RubienPreferences.assistantDictationLocaleIdentifier, "en-US")
+        XCTAssertEqual(RubienPreferences.assistantDictationRecentLocaleIdentifiers, ["en-US", "zh-CN"])
+
+        DictationLanguage.choose(nil)
+        XCTAssertNil(RubienPreferences.assistantDictationLocaleIdentifier)
+        XCTAssertEqual(
+            RubienPreferences.assistantDictationRecentLocaleIdentifiers, ["en-US", "zh-CN"],
+            "the system language is not a recent choice")
     }
 }
 #endif

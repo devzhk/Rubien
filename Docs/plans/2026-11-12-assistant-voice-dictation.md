@@ -745,6 +745,67 @@ request). ⌘D starts and stops dictation, the same action as the button.
   self-test scenario that presses ⌘D in the real window without composer
   focus (start, focus moves to the composer, stop, and a plain "d" is ignored).
 
+Language switcher (2026-11-13, added at the developer's request; they
+dictate in Chinese and English). A small menu sits in the control row just
+before the microphone, and the row now adapts to narrow widths.
+
+- `ComposerDictationLanguageMenu`: a borderless menu in the other pickers'
+  style. Its label is a short code for the language the next dictation starts
+  in, with the pickers' chevron: the first character of the language's own
+  name for Han, kana, and Hangul languages ("中", "日", "한"), otherwise the
+  uppercased language code ("EN"); with "System language" it shows the code of
+  the system language (`DictationLanguage.shortCode`). The menu lists "System
+  Language (English)", then a quick list (the macOS preferred languages mapped
+  through the transcribers' `supportedLocale(equivalentTo:)`, then recent
+  choices, then the current one, each once), then "All Languages" with every
+  supported language. Disabled while this surface is dictating. Absent below
+  macOS 26.
+- Choosing writes the same preference Settings uses and records the language
+  in `RubienPreferences.assistantDictationRecentLocaleIdentifiers` (most recent
+  first, at most four; the system language is not recorded). Settings choices
+  go through the same `DictationLanguage.choose`. The menu and the Settings
+  picker both read the preference through `@AppStorage` on its key, so a
+  choice in one window, the other, or Settings shows everywhere at once.
+- Each surface loads the supported and preferred lists once
+  (`DictationLanguageLists.load`); until then the menu lists "System Language"
+  and the current choice.
+- The control row: the menus between "+" and the microphone are built at five
+  densities inside a `ViewThatFits`, most complete first: full; the model
+  without its effort word; the approval picker without its word; the language
+  code without its chevron; the approval, provider, and model pickers without
+  their chevrons. The buttons sit outside it and exist once. The full layout
+  is the previous row plus the language menu, except that the spacer has no
+  minimum width.
+
+Row arithmetic at the 420-point minimum sidebar: the composer's inner width is
+420 − 2×12 − 2×10 = 376. Widths are each label's text at 13 points plus its
+6-point padding on both sides. The worst case is Codex with "GPT-6-Astra
+Medium", Agent approvals, English, and a response streaming (Stop shown).
+Outside the `ViewThatFits`: "+" 27, microphone 27, Stop and send 27 + 5 + 27,
+and three 8-point gaps, 137 in all, which leaves 239. Inside it, four 8-point
+gaps (32) plus approval, provider, model, and language:
+
+| Layout | Approval | Provider | Model | Language | Total |
+|---|---|---|---|---|---|
+| Full | 81 | 65 | 155 | 43 | 376 |
+| Without effort | 81 | 65 | 103 | 43 | 324 |
+| Approval icon only | 42 | 65 | 103 | 43 | 285 |
+| Code without chevron | 42 | 65 | 103 | 30 | 272 |
+| Without chevrons | 28 | 51 | 89 | 30 | 230 |
+
+Only the last fits in 239, so the three steps first suggested were not enough
+and the chevrons step was added. Without Stop, 271 is available, and the
+fourth layout misses by a point. Longer model names than this still overflow
+in the last layout, as before.
+
+Verified: build with no new warnings, unit tests for the short code, the quick
+list, the recents, and the recents preference, the dictation, composer,
+mention, and app suites, and the macOS 26.5 SDK type-check of the engine
+files. Not verified: anything on screen. The widths above are computed from
+measured text widths, not from the rendered row; the menu, its checkmarks,
+its submenu, and the layouts the row picks have not been seen, nor has the
+menu following a change made in another window or in Settings.
+
 ### Phase 6 — Language setting, docs, release gate
 
 - (Done in Phase 5.) `RubienPreferences.assistantDictationLocaleIdentifier`
@@ -789,7 +850,6 @@ before/after check shows a benefit.
   change under Phase 3).
 - Whisper as an optional downloadable engine (mixed-language dictation).
 - Push-to-talk (hold a key to dictate).
-- Quick language switch from the button's context menu.
 
 ## Changes from revision 1
 

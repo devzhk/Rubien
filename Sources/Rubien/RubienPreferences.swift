@@ -278,6 +278,33 @@ enum RubienPreferences {
         }
     }
 
+    /// Dictation languages recently chosen, most recent first, as BCP-47
+    /// identifiers; at most `assistantDictationRecentLocaleLimit`. The system
+    /// language is never recorded. Listed in the composer's language menu.
+    static let assistantDictationRecentLocaleIdentifiersKey = "Rubien.assistant.dictationRecentLocales"
+    static let assistantDictationRecentLocaleLimit = 4
+
+    static var assistantDictationRecentLocaleIdentifiers: [String] {
+        get {
+            normalizedDictationRecents(
+                UserDefaults.standard.stringArray(forKey: assistantDictationRecentLocaleIdentifiersKey) ?? [])
+        }
+        set {
+            let recents = normalizedDictationRecents(newValue)
+            if recents.isEmpty {
+                UserDefaults.standard.removeObject(forKey: assistantDictationRecentLocaleIdentifiersKey)
+            } else {
+                UserDefaults.standard.set(recents, forKey: assistantDictationRecentLocaleIdentifiersKey)
+            }
+        }
+    }
+
+    private static func normalizedDictationRecents(_ identifiers: [String]) -> [String] {
+        var seen = Set<String>()
+        let unique = identifiers.filter { !$0.isEmpty && seen.insert($0).inserted }
+        return Array(unique.prefix(assistantDictationRecentLocaleLimit))
+    }
+
     /// Default visibility for the assistant panel in newly opened reader windows.
     /// Unset ⇒ visible, so the assistant is discoverable until the user explicitly
     /// hides it. Existing open readers keep their local state; this seeds new ones.

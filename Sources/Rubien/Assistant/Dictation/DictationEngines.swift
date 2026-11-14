@@ -33,6 +33,44 @@ enum DictationEngines {
             .map(\.locale)
     }
 
+    /// The system's preferred languages (`Locale.preferredLanguages`) that
+    /// dictation supports, as the supported languages' BCP-47 identifiers, in
+    /// order and each once. A preferred language with no supported equivalent
+    /// is left out. Empty before macOS 26.
+    static func preferredLanguageIdentifiers(
+        _ preferred: [String] = Locale.preferredLanguages
+    ) async -> [String] {
+        guard #available(macOS 26.0, *) else { return [] }
+        var equivalents: [String: String] = [:]
+        for identifier in preferred where equivalents[identifier] == nil {
+            if let supported = await supportedLocale(equivalentTo: Locale(identifier: identifier)) {
+                equivalents[identifier] = supported.identifier(.bcp47)
+            }
+        }
+        return supportedPreferred(preferred, equivalents: equivalents)
+    }
+
+    /// `preferred` mapped through `equivalents` (preferred identifier →
+    /// supported BCP-47 identifier), skipping those without one and repeats.
+    nonisolated static func supportedPreferred(
+        _ preferred: [String],
+        equivalents: [String: String]
+    ) -> [String] {
+        var seen = Set<String>()
+        return preferred.compactMap { equivalents[$0] }.filter { seen.insert($0).inserted }
+    }
+
+    /// The supported language `makeEngine` would use for `locale`, in the same
+    /// order of preference.
+    @available(macOS 26.0, *)
+    private static func supportedLocale(equivalentTo locale: Locale) async -> Locale? {
+        if SpeechTranscriber.isAvailable,
+           let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) {
+            return supported
+        }
+        return await DictationTranscriber.supportedLocale(equivalentTo: locale)
+    }
+
     /// A `DictationEngineFactory` that listens to the microphone.
     static func makeEngine(for locale: Locale) async throws -> any DictationEngine {
         try await makeEngine(for: locale, audioSource: MicrophoneCapture())
