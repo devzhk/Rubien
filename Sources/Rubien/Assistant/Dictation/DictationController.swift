@@ -9,6 +9,9 @@ import Foundation
 /// at once and keeps exactly the text on screen; it is what sending, switching
 /// surfaces, and quitting use. An interruption from the editor (the user typed)
 /// freezes too.
+///
+/// The app keeps one controller for its whole life. A running session holds the
+/// controller until it ends.
 @MainActor
 final class DictationController: ObservableObject {
     /// Identifies one composer surface for as long as its view lives.
@@ -47,6 +50,7 @@ final class DictationController: ObservableObject {
         let owner: Owner
         let bridge: ComposerDictationBridge
         var engine: (any DictationEngine)?
+        var lastTranscript: String?
         var run: Task<Void, Never>?
         var silenceTimer: Task<Void, Never>?
         var deadline: Task<Void, Never>?
@@ -111,6 +115,7 @@ final class DictationController: ObservableObject {
         engine.finish()
         session.deadline = Task { [weak self, sleep] in
             do { try await sleep(Self.finishDeadline) } catch { return }
+            guard !Task.isCancelled else { return }
             self?.close(session)
         }
     }
@@ -164,8 +169,11 @@ final class DictationController: ObservableObject {
                 }
             }
 
-            try await engine.prepare { [weak self] progress in
-                guard let self, self.isCurrent(session), case .preparing = self.state else { return }
+            // Weak: an engine may keep this callback, and the session keeps the engine.
+            try await engine.prepare { [weak self, weak session] progress in
+                guard let self, let session, self.isCurrent(session),
+                      case .preparing = self.state
+                else { return }
                 self.state = .preparing(progress: progress)
             }
             guard isCurrent(session) else { return }
@@ -174,6 +182,12 @@ final class DictationController: ObservableObject {
             // that cannot take text never starts a recording.
             guard session.bridge.begin(separatingFromPrecedingText: separatingFromPrecedingText)
             else { throw DictationFailure.editorUnavailable }
+            guard isCurrent(session) else {
+                // Ended from an editor callback while the editor was being
+                // claimed; give the claim back.
+                session.bridge.end()
+                return
+            }
             session.bridge.onInterruption = { [weak self] in self?.close(session) }
 
             let transcripts = try await engine.start()
@@ -189,6 +203,10 @@ final class DictationController: ObservableObject {
             for try await transcript in transcripts {
                 guard isCurrent(session) else { return }
                 session.bridge.update(transcript: transcript)
+                // Only new text counts as activity; an engine repeating itself
+                // must not keep the microphone open.
+                guard isCurrent(session), transcript != session.lastTranscript else { continue }
+                session.lastTranscript = transcript
                 if state == .listening { restartSilenceTimer(for: session) }
             }
             close(session)
@@ -211,6 +229,7 @@ final class DictationController: ObservableObject {
         session.bridge.onInterruption = nil
         session.bridge.end()
         session.engine?.cancel()
+        session.engine = nil
         session.run?.cancel()
         session.silenceTimer?.cancel()
         session.deadline?.cancel()
@@ -220,7 +239,7 @@ final class DictationController: ObservableObject {
         session.silenceTimer?.cancel()
         session.silenceTimer = Task { [weak self, sleep] in
             do { try await sleep(Self.silenceTimeout) } catch { return }
-            guard let self, self.isCurrent(session) else { return }
+            guard !Task.isCancelled, let self, self.isCurrent(session) else { return }
             self.finish(owner: session.owner)
         }
     }

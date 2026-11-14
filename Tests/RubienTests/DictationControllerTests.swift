@@ -31,6 +31,9 @@ private final class FakeEngine: DictationEngine {
     var prepareError: Error?
     var startGate: Gate?
     var startError: Error?
+    /// A real engine ends its stream when cancelled. Turning this off checks
+    /// that the controller itself ignores what a cancelled engine still sends.
+    var endsStreamOnCancel = true
     private(set) var calls: [String] = []
     private var reportProgress: (@MainActor (Double) -> Void)?
     private var continuation: AsyncThrowingStream<String, Error>.Continuation?
@@ -53,7 +56,7 @@ private final class FakeEngine: DictationEngine {
 
     func cancel() {
         calls.append("cancel")
-        continuation?.finish()
+        if endsStreamOnCancel { continuation?.finish() }
     }
 
     func progress(_ value: Double) { reportProgress?(value) }
@@ -104,7 +107,13 @@ private final class ManualSleeper: @unchecked Sendable {
     }
 
     func pendingCount(_ duration: Duration) -> Int {
-        lock.withLock { pending.values.filter { $0.duration == duration }.count }
+        pendingIDs(duration).count
+    }
+
+    /// Identifies the pending sleeps of `duration`, so a test can tell a timer
+    /// that was replaced from one that was left running.
+    func pendingIDs(_ duration: Duration) -> Set<Int> {
+        lock.withLock { Set(pending.filter { $0.value.duration == duration }.map(\.key)) }
     }
 
     private func resume(_ id: Int, throwing error: Error?) {
@@ -168,6 +177,22 @@ final class DictationControllerTests: XCTestCase {
             },
             authorizer: authorizer,
             sleep: { try await sleeper.sleep($0) })
+    }
+
+    override func tearDown() async throws {
+        // Let every suspended session run to its end, so no test leaves work
+        // (and the controller it holds) parked on a gate.
+        controller.freezeAll()
+        factoryGate?.open()
+        authorizer.gate?.open()
+        for engine in engines + [nextEngine].compactMap({ $0 }) {
+            engine.prepareGate?.open()
+            engine.startGate?.open()
+            engine.complete()
+        }
+        engines = []
+        controller = nil
+        try await super.tearDown()
     }
 
     private func waitUntil(
@@ -406,6 +431,7 @@ final class DictationControllerTests: XCTestCase {
         engine.emit("hello")
         await waitUntil { surface.text == "hello" }
 
+        engine.endsStreamOnCancel = false
         controller.freeze(owner: surface.owner)
         XCTAssertEqual(controller.state, .idle)
         XCTAssertEqual(engine.calls.last, "cancel")
@@ -415,6 +441,34 @@ final class DictationControllerTests: XCTestCase {
         await settle()
         XCTAssertEqual(surface.text, "hello")
         XCTAssertNil(controller.failure)
+    }
+
+    func testEngineCompletingByItselfEndsTheSessionCleanly() async {
+        let surface = Surface()
+        let engine = await startListening(surface)
+        engine.emit("hello")
+        await waitUntil { surface.text == "hello" }
+
+        engine.complete()
+        await waitUntil { self.controller.state == .idle }
+        XCTAssertNil(controller.failure)
+        XCTAssertNil(controller.owner)
+        XCTAssertFalse(surface.bridge.isActive)
+        XCTAssertEqual(surface.text, "hello")
+    }
+
+    func testAnEndedSessionReleasesItsEngine() async {
+        let surface = Surface()
+        weak var releasedEngine: FakeEngine?
+        do {
+            let engine = await startListening(surface)
+            releasedEngine = engine
+            // The engine keeps the progress callback, as a real one may.
+            engine.progress(1)
+        }
+        controller.freeze(owner: surface.owner)
+        engines = []
+        await waitUntil { releasedEngine == nil }
     }
 
     func testTypingFreezesTheSession() async {
@@ -527,6 +581,27 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(controller.state(for: second.owner), .listening)
     }
 
+    func testRestartingFromTheSameSurfaceWhilePreparingReplacesTheSession() async {
+        let first = FakeEngine()
+        first.prepareGate = Gate()
+        nextEngine = first
+        let surface = Surface()
+        controller.start(owner: surface.owner, bridge: surface.bridge, locale: .current)
+        await waitUntil { first.calls == ["prepare"] }
+
+        let second = await startListening(surface)
+        XCTAssertEqual(first.calls, ["prepare", "cancel"])
+
+        // The abandoned preparation finishing late must not disturb its successor.
+        first.progress(0.5)
+        first.prepareGate?.open()
+        await settle()
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertFalse(first.calls.contains("start"))
+        second.emit("hi")
+        await waitUntil { surface.text == "hi" }
+    }
+
     func testFreezeAllStopsWhicheverSurfaceIsActive() async {
         let surface = Surface()
         let engine = await startListening(surface)
@@ -537,21 +612,31 @@ final class DictationControllerTests: XCTestCase {
 
     // MARK: Silence
 
-    func testSilenceFinishesTheSessionAndNewWordsPostponeIt() async {
+    func testOnlyNewWordsPostponeTheSilenceTimeout() async {
+        let silence = DictationController.silenceTimeout
         let surface = Surface()
         let engine = await startListening(surface)
-        await waitUntil { self.sleeper.pendingCount(DictationController.silenceTimeout) == 1 }
+        await waitUntil { self.sleeper.pendingCount(silence) == 1 }
+        let first = sleeper.pendingIDs(silence)
 
-        // New words replace the pending timer rather than stacking another.
+        // New words replace the pending timer with a fresh one.
         engine.emit("hello")
         await waitUntil { surface.text == "hello" }
-        await waitUntil { self.sleeper.pendingCount(DictationController.silenceTimeout) == 1 }
+        await waitUntil {
+            self.sleeper.pendingCount(silence) == 1 && self.sleeper.pendingIDs(silence) != first
+        }
+        let second = sleeper.pendingIDs(silence)
         XCTAssertEqual(controller.state, .listening)
 
-        sleeper.fire(DictationController.silenceTimeout)
+        // An engine repeating the same transcript is not activity.
+        engine.emit("hello")
+        await settle()
+        XCTAssertEqual(sleeper.pendingIDs(silence), second)
+
+        sleeper.fire(silence)
         await waitUntil { self.controller.state == .finishing }
         XCTAssertEqual(engine.calls.last, "finish")
-        XCTAssertEqual(sleeper.pendingCount(DictationController.silenceTimeout), 0)
+        XCTAssertEqual(sleeper.pendingCount(silence), 0)
     }
 }
 #endif
