@@ -867,5 +867,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.8</title>
+            <description sparkle:format="plain-text"><![CDATA[• Dictate messages to the Assistant: click the microphone in the composer or press ⌘D, speak, and edit the text before sending. Speech is transcribed on your Mac and no audio leaves it. Requires macOS 26 or later.
+• Switch the dictation language from the small menu beside the microphone, or in Settings → Assistant.
+• Undo and redo in the Assistant composer now update the hint text and Send button right away.]]></description>
+            <pubDate>Sat, 14 Nov 2026 18:22:37 +0000</pubDate>
+            <sparkle:version>59</sparkle:version>
+            <sparkle:shortVersionString>0.8.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.8/Rubien-0.8.8.dmg"
+                sparkle:edSignature="4iuBzGSocEN6xu4O3uSotYijjjmDu9JFFNZ1J1lT6qx1Jppyie5EIKXMK0p4ZPe7XItxob24f/32q13CTJjVCA=="
+                length="19193161"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
