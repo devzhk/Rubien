@@ -33,6 +33,8 @@ Your AI agent is available from Home or beside any open document. Rubien exposes
 - Suggest what to read: "Recommend a paper based on my recent reading history."
 - Run scheduled jobs: "Every weekday at 8 a.m., find new papers on my topic."
 
+On macOS 26 or later you can dictate a message: click the microphone in the composer, speak, and edit the text before sending. Speech is transcribed on your Mac, and no audio leaves it. Choose the language in Settings → Assistant. Once Rubien has microphone access, commands that Claude Code runs can use the microphone too; the approval setting in Settings → Assistant decides whether Rubien asks before a command runs.
+
 ### Import with validation
 
 For papers and books, Rubien validates publication metadata and imports from trusted publishers. For web sources such as blog posts and news articles, Rubien keeps a readable article clip and gives the assistant a compact Markdown representation.

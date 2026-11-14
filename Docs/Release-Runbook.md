@@ -130,6 +130,7 @@ git status --short --branch
 CODESIGN_ENABLED=0 ./scripts/build-app.sh release dmg
 
 # 6. Set the Developer ID identity in your shell
+# When it applies, complete the "Dictation microphone gate" below first.
 # If an agent is driving the release, show the exact version/build, notes, and
 # external effects above and obtain explicit user approval before continuing.
 export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
@@ -290,6 +291,16 @@ If the candidate fails, stop before signing or publication, fix the issue, and
 repeat the normal commit, exact-SHA CI, and candidate-smoke gates. This unsigned
 candidate gate validates the app/host/extension integration but does not replace
 the signed/notarized checks in `release.sh`.
+
+## Dictation microphone gate
+
+Required for the first release that contains Assistant dictation, and for any release that changes `Sources/Rubien/Rubien.entitlements`, the signing steps, or `scripts/lib/privacy-usage.sh`. Do it before approving the release command in step 6, because `release.sh` publishes in the same run that signs.
+
+1. Sign a debug build with the Developer ID identity: `CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)" ./scripts/build-app.sh debug`.
+2. Launch that exact `build/Rubien.app`, open the Assistant, click the microphone in the composer, allow the macOS prompt, and dictate one sentence.
+3. Stop the release if the app does not launch, no prompt appears, or no text arrives.
+
+`build-app.sh` already fails when a usage string is missing or the signed bundle lacks the `audio-input` entitlement as a Boolean true. This gate covers what a script cannot: that Hardened Runtime lets the signed app hear audio, and that the Developer ID provisioning profile accepts the entitlement. Unsigned candidates, the preview app, and `dev-launch.sh` builds do not use Hardened Runtime, so they pass even when the entitlement is wrong.
 
 ## Environment and signing invariants
 

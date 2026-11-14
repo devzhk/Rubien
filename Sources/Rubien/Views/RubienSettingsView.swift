@@ -898,7 +898,7 @@ struct RubienSettingsView: View {
             Text(String(localized: "Dictation", bundle: .module))
         } footer: {
             Text(String(
-                localized: "Speech is transcribed on this Mac. Once Rubien has microphone access, commands run by Claude Code can use the microphone too. The default Ask approval mode asks before each command; Auto mode does not.",
+                localized: "Speech is transcribed on this Mac. Once Rubien has microphone access, commands that Claude Code runs can use the microphone too. Approvals, above, decide whether Rubien asks before a command runs.",
                 bundle: .module
             ))
         }

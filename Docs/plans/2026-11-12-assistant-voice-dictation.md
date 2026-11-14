@@ -560,10 +560,61 @@ button, its states and popover, live text, freeze on send or window close,
 mention suppression, the Settings picker), and every manual check listed
 above.
 
+Orchestrator review and end-to-end check of Phase 5 (2026-11-13). The diff was
+read in full, and the running app was driven by `DictationSelfTest`
+(`Sources/Rubien/Assistant/Dictation/DictationSelfTest.swift`, debug builds
+only). Launching a debug build with `RUBIEN_DICTATION_SELFTEST=<directory>`
+opens the Assistant Sidebar Harness, clicks the dictation button with real
+mouse events at the position the button reports, and writes `report.json`
+plus window snapshots. With `RUBIEN_DICTATION_AUDIO_FILE` set it dictates that
+recording and needs no permission. To repeat it:
+
+```bash
+./scripts/preview-app.sh --no-launch
+open --env RUBIEN_LIBRARY_ROOT="$PWD/build/ProviderSetupPreview/Library" \
+     --env RUBIEN_DICTATION_SELFTEST=/tmp/rubien-dictation-selftest \
+     --env RUBIEN_DICTATION_AUDIO_FILE="$PWD/Tests/RubienTests/Fixtures/dictation-attention.wav" \
+     --env RUBIEN_DICTATION_SELFTEST_EXPECT="compare,attention,mechanism,recurrent,networks" \
+     "build/ProviderSetupPreview/Rubien Setup Preview.app"
+```
+
+Result in the preview app, with the recorded fixture: all 14 checks passed.
+
+- A real click starts dictation; listening is reached about a third of a
+  second later, and text streams into the composer while listening.
+- Stop returns to idle with "Compare the attention mechanism with recurrent
+  networks." in the draft. One undo removes it and redo restores it.
+- Typing while listening ends dictation at once, keeps the typed character,
+  and nothing more is dictated.
+- Command-Return while listening sends exactly the visible text, clears the
+  draft, and nothing is dictated into the empty draft afterwards.
+- The snapshots show the idle, listening, and after-send states laid out
+  correctly at the sidebar's minimum width.
+
+Two things learned while building the driver, recorded so they are not
+rediscovered: SwiftUI does not build its accessibility tree for an in-process
+query, so a button cannot be found or pressed that way; and a view's `.global`
+frame is measured from the top-left of the window including the title bar. A
+recording stops supplying audio at its end, so the recognizer holds the last
+words until Stop; a microphone keeps supplying silence.
+
+Changed in review: the Settings disclosure no longer says the Ask mode asks
+before each command, because agent rules can allow a command without asking.
+It now says that Approvals decide whether Rubien asks before a command runs.
+
+Not yet verified by anyone: the failure popover, the Settings picker on
+screen, Agent Home's composer, two windows at once, a model download, and the
+real microphone.
+
+One unrelated test, `CodexProviderTests/testHistoryTimeoutResetsTheServerAndRetrySucceeds`,
+failed once in a full app-suite run and passed three times alone. It is
+timing-sensitive and predates this work.
+
 ### Phase 6 — Language setting, docs, release gate
 
-- `RubienPreferences.assistantDictationLocale` with a `@State` mirror in
-  `RubienSettingsView`; picker lists "System language" plus supported locales.
+- (Done in Phase 5.) `RubienPreferences.assistantDictationLocaleIdentifier`
+  with a `@State` mirror in `RubienSettingsView`; picker lists "System
+  language" plus supported locales.
 - README feature list and release notes text. State plainly that after
   microphone access is granted to Rubien, commands run by Claude Code can use
   the microphone too, that the default Ask approval mode gates each command,
