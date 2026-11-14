@@ -14,7 +14,9 @@ import AppKit
 /// Optional settings: `RUBIEN_DICTATION_SELFTEST_EXPECT` (comma-separated text
 /// the result must contain), `RUBIEN_DICTATION_SELFTEST_MODE=failure` (expect
 /// the start to fail and check the popover), `…_LISTEN_SECONDS` and
-/// `…_START_TIMEOUT` for longer recordings or a model download.
+/// `…_START_TIMEOUT` for longer recordings or a model download, and, with the
+/// microphone, `…_PLAY` (a recording to play through the speakers so the
+/// microphone has something to hear).
 /// (SwiftUI does not build its accessibility tree for an in-process query, so
 /// the button cannot be found or pressed that way.)
 @MainActor
@@ -40,6 +42,7 @@ enum DictationSelfTest {
         let usesMicrophone = (environment["RUBIEN_DICTATION_AUDIO_FILE"] ?? "").isEmpty
         Task {
             var run = Run(output: output, expected: expected, usesMicrophone: usesMicrophone)
+            run.playPath = environment["RUBIEN_DICTATION_SELFTEST_PLAY"]
             run.expectsFailure = environment["RUBIEN_DICTATION_SELFTEST_MODE"] == "failure"
             if let seconds = Double(environment["RUBIEN_DICTATION_SELFTEST_LISTEN_SECONDS"] ?? "") {
                 run.listenSeconds = seconds
@@ -76,6 +79,7 @@ enum DictationSelfTest {
         let expected: [String]
         let usesMicrophone: Bool
         var expectsFailure = false
+        var playPath: String?
         var listenSeconds = 5.0
         var startTimeout: Double?
         var checks: [Check] = []
@@ -167,9 +171,17 @@ enum DictationSelfTest {
             snapshot(window, "2-listening")
 
             if usesMicrophone {
-                // Nobody may be speaking; hearing nothing is not a failure here.
-                try await Task.sleep(for: .seconds(6))
-                note("microphone text after 6 s: \"\(editor.string)\"")
+                if let playPath, let sound = NSSound(contentsOfFile: playPath, byReference: true) {
+                    note("playing \((playPath as NSString).lastPathComponent) through the speakers")
+                    sound.play()
+                    try await Task.sleep(for: .seconds(listenSeconds + 3))
+                    check("the microphone heard the played recording",
+                          Self.contains(editor.string, expected), "\"\(editor.string)\"")
+                } else {
+                    // Nobody may be speaking; hearing nothing is not a failure here.
+                    try await Task.sleep(for: .seconds(6))
+                    note("microphone text after 6 s: \"\(editor.string)\"")
+                }
             } else {
                 try await waitUntil("streamed text", timeout: 30) { !editor.string.isEmpty }
                 let partial = editor.string
