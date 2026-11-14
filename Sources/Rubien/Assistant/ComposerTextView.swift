@@ -122,6 +122,8 @@ final class ComposerNSTextView: NSTextView {
     var onAttachFiles: ([URL]) -> Void = { _ in }
     var onAttachImageData: (Data, String) -> Void = { _, _ in }
     var onDragTargeted: (Bool) -> Void = { _ in }
+    /// Returns whether it acted, so the key falls through when it did not.
+    var onToggleDictation: () -> Bool = { false }
     /// Live dictation into this editor, if the surface offers it. The bridge
     /// keeps a matching back-reference, so the two are linked and unlinked here.
     weak var dictationBridge: ComposerDictationBridge? {
@@ -170,6 +172,16 @@ final class ComposerNSTextView: NSTextView {
     /// system. Key equivalents sweep the whole window's view tree, so require first
     /// responder — an unfocused composer must not steal ⌘↩ from elsewhere.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // Unlike ⌘↩ this needs no focus here: the shortcut dictates to this
+        // window's composer from wherever the user is reading. The handler
+        // declines for a composer that is mounted but not showing.
+        if Self.isDictationChord(
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+            modifierFlags: event.modifierFlags),
+            onToggleDictation()
+        {
+            return true
+        }
         if window?.firstResponder === self,
             Self.isCommandReturnChord(keyCode: event.keyCode, modifierFlags: event.modifierFlags)
         {
@@ -189,6 +201,19 @@ final class ComposerNSTextView: NSTextView {
         let returnKey: UInt16 = 36
         let keypadEnter: UInt16 = 76
         guard keyCode == returnKey || keyCode == keypadEnter else { return false }
+        let chord = modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting([.capsLock, .numericPad, .function])
+        return chord == .command
+    }
+
+    /// EXACTLY ⌘D, by character rather than key code so it follows the
+    /// keyboard layout.
+    static func isDictationChord(
+        charactersIgnoringModifiers: String?,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        guard charactersIgnoringModifiers?.lowercased() == "d" else { return false }
         let chord = modifierFlags
             .intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
@@ -357,6 +382,7 @@ struct ComposerTextView: NSViewRepresentable {
     var onAttachImageData: (Data, String) -> Void
     var onDragTargeted: (Bool) -> Void
     var dictationBridge: ComposerDictationBridge? = nil
+    var onToggleDictation: () -> Bool = { false }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -378,6 +404,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onAttachImageData = onAttachImageData
         textView.onDragTargeted = onDragTargeted
         textView.dictationBridge = dictationBridge
+        textView.onToggleDictation = onToggleDictation
 
         scrollView.documentView = textView
         return scrollView
@@ -420,6 +447,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onAttachImageData = onAttachImageData
         textView.onDragTargeted = onDragTargeted
         textView.dictationBridge = dictationBridge
+        textView.onToggleDictation = onToggleDictation
         let coordinator = context.coordinator
         coordinator.syncExternalState(text: text, selection: selection, into: textView)
 

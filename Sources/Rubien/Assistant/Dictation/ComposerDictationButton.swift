@@ -8,10 +8,8 @@ struct ComposerDictationButton: View {
     @ObservedObject var controller: DictationController
     let owner: DictationController.Owner
     let bridge: ComposerDictationBridge
-    /// Whether the caret sits at the end of a selected mention. The controller
-    /// asks just before dictation claims the editor.
-    let separatingFromPrecedingText: () -> Bool
-    let onStart: () -> Void
+    /// Starts or stops dictation; shared with the surface's keyboard shortcut.
+    let toggle: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovered = false
@@ -37,7 +35,7 @@ struct ComposerDictationButton: View {
         .background(Self.shape.fill(background))
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
-        .help(label)
+        .help(helpText)
         .accessibilityLabel(label)
         .accessibilityIdentifier("composer-dictation-button")
         #if DEBUG
@@ -103,6 +101,14 @@ struct ComposerDictationButton: View {
         }
     }
 
+    /// The shortcut is only worth advertising where it does something obvious.
+    private var helpText: String {
+        switch state {
+        case .idle, .listening: return "\(label) (⌘D)"
+        case .preparing, .finishing: return label
+        }
+    }
+
     private var label: String {
         switch state {
         case .idle: return "Dictate"
@@ -112,19 +118,6 @@ struct ComposerDictationButton: View {
         case .listening: return "Stop dictation"
         case .finishing: return "Finishing dictation…"
         }
-    }
-
-    private func toggle() {
-        guard state == .idle else {
-            controller.finish(owner: owner)
-            return
-        }
-        controller.start(
-            owner: owner,
-            bridge: bridge,
-            locale: DictationLanguage.startLocale(),
-            separatingFromPrecedingText: separatingFromPrecedingText)
-        onStart()
     }
 
     // MARK: Failure

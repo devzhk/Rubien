@@ -727,6 +727,24 @@ Still not verified: a real device change during capture (the restart path has
 only been compiled and reasoned against the AVFAudio headers), and none of
 these fixes has been exercised in the running app.
 
+Keyboard shortcut (2026-11-13, added after the merge at the developer's
+request). ⌘D starts and stops dictation, the same action as the button.
+
+- It is handled in `ComposerNSTextView.performKeyEquivalent`, which the window
+  sweeps for key equivalents, so it works from anywhere in the window (while
+  reading the PDF, say), not only with the caret in the composer. Starting
+  moves focus to the composer.
+- The surface declines when it is mounted but not showing (Agent Home behind
+  the library), so the key falls through there.
+- The key is matched by character, not key code, so it follows the keyboard
+  layout. No existing Rubien shortcut used ⌘D.
+- `DictationController.toggle` is the one action behind both the button and
+  the shortcut. The button's tooltip and the composer's empty-state hints
+  show the shortcut.
+- Verified by unit tests for the key matching and the toggle, and by a
+  self-test scenario that presses ⌘D in the real window without composer
+  focus (start, focus moves to the composer, stop, and a plain "d" is ignored).
+
 ### Phase 6 — Language setting, docs, release gate
 
 - (Done in Phase 5.) `RubienPreferences.assistantDictationLocaleIdentifier`
@@ -770,7 +788,7 @@ before/after check shows a benefit.
 - An `SFSpeechRecognizer` backend for macOS 14.4 through 15 (see the scope
   change under Phase 3).
 - Whisper as an optional downloadable engine (mixed-language dictation).
-- A keyboard shortcut and push-to-talk.
+- Push-to-talk (hold a key to dictate).
 - Quick language switch from the button's context menu.
 
 ## Changes from revision 1

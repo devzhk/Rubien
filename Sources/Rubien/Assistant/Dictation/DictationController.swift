@@ -106,6 +106,25 @@ final class DictationController: ObservableObject {
         }
     }
 
+    /// The button's and the keyboard shortcut's one action: start when `owner`
+    /// is idle, otherwise stop as `finish` does. Returns whether it started.
+    @discardableResult
+    func toggle(
+        owner: Owner,
+        bridge: ComposerDictationBridge,
+        locale: Locale,
+        separatingFromPrecedingText: @escaping @MainActor () -> Bool = { false }
+    ) -> Bool {
+        guard state(for: owner) == .idle else {
+            finish(owner: owner)
+            return false
+        }
+        start(
+            owner: owner, bridge: bridge, locale: locale,
+            separatingFromPrecedingText: separatingFromPrecedingText)
+        return true
+    }
+
     /// The user's Stop. While listening, capture stops and the last words are
     /// still applied; at any other stage the session simply ends.
     func finish(owner: Owner) {

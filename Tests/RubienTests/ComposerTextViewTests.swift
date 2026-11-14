@@ -179,6 +179,22 @@ final class ComposerTextViewTests: XCTestCase {
 
     // MARK: Paper-mention navigation
 
+    func testDictationChordIsExactlyCommandDOnAnyLayout() {
+        func chord(_ characters: String?, _ flags: NSEvent.ModifierFlags) -> Bool {
+            ComposerNSTextView.isDictationChord(
+                charactersIgnoringModifiers: characters, modifierFlags: flags)
+        }
+        XCTAssertTrue(chord("d", [.command]))
+        // Caps lock reports as a modifier and capitalises the character.
+        XCTAssertTrue(chord("D", [.command, .capsLock]))
+        XCTAssertFalse(chord("d", []))
+        XCTAssertFalse(chord("d", [.command, .shift]))
+        XCTAssertFalse(chord("d", [.command, .option]))
+        XCTAssertFalse(chord("d", [.control]))
+        XCTAssertFalse(chord("e", [.command]))
+        XCTAssertFalse(chord(nil, [.command]))
+    }
+
     func testMentionNavigationRecognizesOnlyUnmodifiedKeys() {
         XCTAssertEqual(ComposerNSTextView.navigationKey(
             keyCode: 36, modifierFlags: []), .returnKey)

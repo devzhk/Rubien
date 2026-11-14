@@ -450,6 +450,23 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(engine.calls.last, "cancel")
     }
 
+    func testToggleStartsWhenIdleAndStopsOtherwise() async {
+        let surface = Surface()
+        let other = Surface()
+        XCTAssertTrue(controller.toggle(owner: surface.owner, bridge: surface.bridge, locale: .current))
+        await waitUntil { self.controller.state == .listening }
+        let engine = engines[0]
+
+        // Another surface is idle, so its toggle starts and takes over.
+        XCTAssertTrue(controller.toggle(owner: other.owner, bridge: other.bridge, locale: .current))
+        XCTAssertEqual(engine.calls.last, "cancel")
+        await waitUntil { self.controller.state(for: other.owner) == .listening }
+
+        XCTAssertFalse(controller.toggle(owner: other.owner, bridge: other.bridge, locale: .current))
+        XCTAssertEqual(controller.state(for: other.owner), .finishing)
+        XCTAssertEqual(engines[1].calls.last, "finish")
+    }
+
     // MARK: Freeze and interruptions
 
     func testFreezeKeepsVisibleTextAndDropsLateResults() async {

@@ -1091,13 +1091,7 @@ struct ChatSurfaceView: View {
                     controller: dictation,
                     owner: dictationOwner,
                     bridge: dictationBridge,
-                    separatingFromPrecedingText: {
-                        let text = composerText
-                        bringMentionsUpToDate(with: text)
-                        return PaperMentions.caretEndsMention(
-                            draftSelection, in: text, mentions: selectedMentions)
-                    },
-                    onStart: { editorFocusRequests += 1 })
+                    toggle: { _ = toggleDictation() })
                 composerButton
             }
         }
@@ -1529,6 +1523,9 @@ struct ChatSurfaceView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     composerHint("⌘↩", "Send")
                     composerHint("⌘V", "Paste an image")
+                    if DictationEngines.isSupported {
+                        composerHint("⌘D", "Dictate")
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1586,7 +1583,8 @@ struct ChatSurfaceView: View {
                 onAttachFiles: { session.stageAttachments($0) },
                 onAttachImageData: { session.stagePastedImage($0, suggestedName: $1) },
                 onDragTargeted: { isDropTargeted = $0 },
-                dictationBridge: dictationBridge
+                dictationBridge: dictationBridge,
+                onToggleDictation: toggleDictation
             )
                 .popover(
                     isPresented: mentionPopoverPresented,
@@ -1977,6 +1975,25 @@ struct ChatSurfaceView: View {
     /// edit in Agent Home, whose draft is owned several views up.
     private var composerText: String {
         dictationBridge.editorText ?? draft
+    }
+
+    /// The dictation button's action and the ⌘D shortcut's. Returns false, so
+    /// the key falls through, when this composer is not the one on screen
+    /// (Agent Home stays mounted behind the library).
+    private func toggleDictation() -> Bool {
+        guard DictationEngines.isSupported, isActive else { return false }
+        let started = dictation.toggle(
+            owner: dictationOwner,
+            bridge: dictationBridge,
+            locale: DictationLanguage.startLocale(),
+            separatingFromPrecedingText: {
+                let text = composerText
+                bringMentionsUpToDate(with: text)
+                return PaperMentions.caretEndsMention(
+                    draftSelection, in: text, mentions: selectedMentions)
+            })
+        if started { editorFocusRequests += 1 }
+        return true
     }
 
     private var isDictating: Bool {

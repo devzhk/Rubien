@@ -138,6 +138,7 @@ enum DictationSelfTest {
                     try await dictateAndStop(window: window, editor: editor)
                     try await typingFreezes(window: window, editor: editor)
                     try await sendFreezes(window: window, editor: editor)
+                    try await shortcutToggles(window: window, editor: editor)
                     try await handoffBetweenWindows(window: window, editor: editor)
                 }
             } catch let failure as Failed {
@@ -245,6 +246,50 @@ enum DictationSelfTest {
             try await Task.sleep(for: .seconds(2))
             check("nothing is dictated into the empty draft afterwards", editor.string.isEmpty, "\"\(editor.string)\"")
             snapshot(window, "5-after-send")
+        }
+
+        /// ⌘D starts and stops dictation in this window's composer, whether or
+        /// not the composer has keyboard focus.
+        private mutating func shortcutToggles(window: NSWindow, editor: ComposerNSTextView) async throws {
+            guard !usesMicrophone else { return }
+            clear(editor)
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(nil)
+            check("the composer does not have focus", window.firstResponder !== editor)
+
+            check("⌘D is handled without composer focus", try pressCommandD(in: window))
+            try await waitUntil("listening after ⌘D", timeout: 60) { controller.state == .listening }
+            check("⌘D starts dictation", true)
+            try await waitUntil("focus moving to the composer", timeout: 5) { window.firstResponder === editor }
+            check("starting moves focus to the composer", true)
+            try await waitUntil("some text", timeout: 30) { !editor.string.isEmpty }
+
+            check("⌘D is handled while listening", try pressCommandD(in: window))
+            try await waitUntil("idle after the second ⌘D", timeout: 10) { controller.state == .idle }
+            check("a second ⌘D stops dictation", controller.failure == nil, "\"\(editor.string)\"")
+
+            let plainD = try keyEvent("d", modifiers: [], in: window)
+            check("a plain d is not taken as the shortcut", !window.performKeyEquivalent(with: plainD))
+            check("and starts nothing", controller.state == .idle)
+        }
+
+        private func pressCommandD(in window: NSWindow) throws -> Bool {
+            window.performKeyEquivalent(with: try keyEvent("d", modifiers: .command, in: window))
+        }
+
+        private func keyEvent(
+            _ character: String,
+            modifiers: NSEvent.ModifierFlags,
+            in window: NSWindow
+        ) throws -> NSEvent {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                characters: character, charactersIgnoringModifiers: character,
+                isARepeat: false, keyCode: 2)
+            else { throw Failed(reason: "could not create a key event") }
+            return event
         }
 
         /// Starting in another window takes the session over; the first window
