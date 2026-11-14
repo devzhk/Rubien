@@ -27,20 +27,22 @@ mention handling; opt-in live tests run the real recognizer on a checked-in
 recording. A Release configuration compiles and contains none of the
 debug-only test hooks.
 
+The real microphone works too. With microphone access granted to the preview
+app, the self-test started dictation with a real click, played the checked-in
+recording through the Mac's speakers, and the microphone path transcribed it
+as "Compare the attention mechanism with recurrent networks." Stop, undo, and
+redo passed on that text. That exercised `MicrophoneCapture`, the system
+authorizer, and the permission prompt for the first time.
+
 Not verified, in order of importance:
 
-1. **The real microphone.** `MicrophoneCapture` has never captured audio. The
-   self-test reached the macOS permission prompt in the preview app and timed
-   out waiting for a person to answer it. To check: run
-   `./scripts/preview-app.sh`, click the microphone in the Home composer,
-   allow the prompt, and speak.
-2. **Device changes during capture** (plugging in or switching a headset,
+1. **Device changes during capture** (plugging in or switching a headset,
    Bluetooth profile switches). The recovery code follows the AVFAudio headers
    and is guarded against exceptions, but has never run.
-3. **A Developer ID signed, Hardened Runtime build.** The release runbook now
+2. **A Developer ID signed, Hardened Runtime build.** The release runbook now
    has a microphone gate for this; the provisioning profile's acceptance of
    the `audio-input` entitlement is only settled there.
-4. The Settings picker on screen, real reader windows (the harness uses the
+3. The Settings picker on screen, real reader windows (the harness uses the
    same surface), and agent microphone inheritance in Rubien's own bundle
    (confirmed with a stand-in app in Phase 1).
 
