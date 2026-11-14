@@ -18,7 +18,7 @@ enum DictationFailure: Error, Equatable {
     case languageUnsupported
     case noMicrophone
     /// The composer cannot take dictated text right now (an input method is
-    /// composing, or there is no editable editor).
+    /// composing, there is no editable editor, or it already takes dictation).
     case editorUnavailable
     case recognitionFailed(String)
 }

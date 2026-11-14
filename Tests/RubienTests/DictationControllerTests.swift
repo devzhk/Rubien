@@ -271,6 +271,33 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(controller.state, .listening)
     }
 
+    /// The caret can move during a permission prompt or model download, so
+    /// whether to separate from the preceding text is asked when the editor is
+    /// claimed, not when Start is clicked.
+    func testSeparationIsDecidedWhenTheEditorIsClaimed() async {
+        authorizer.gate = Gate()
+        let surface = Surface("abc")
+        var asked = 0
+        var separate = false
+        controller.start(
+            owner: surface.owner, bridge: surface.bridge, locale: .current,
+            separatingFromPrecedingText: {
+                asked += 1
+                return separate
+            })
+        await waitUntil { self.authorizer.requested == [.microphone] }
+        XCTAssertEqual(asked, 0)
+
+        separate = true
+        authorizer.gate?.open()
+        await waitUntil { self.controller.state == .listening }
+        XCTAssertEqual(asked, 1)
+        XCTAssertTrue(surface.bridge.isActive)
+
+        engines[0].emit("中文")
+        await waitUntil { surface.text == "abc 中文" }
+    }
+
     // MARK: Failures
 
     func testDeniedMicrophoneFailsWithoutTouchingTheEngineOrEditor() async {

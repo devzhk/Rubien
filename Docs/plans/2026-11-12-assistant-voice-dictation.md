@@ -647,6 +647,44 @@ Still not verified: the real microphone, the Settings picker on screen, the
 reader windows themselves (the harness uses the same surface), and a device
 change during capture.
 
+#### Review fix batch (2026-11-13)
+
+An independent review of the branch found these, now fixed:
+
+- **Device changes.** `MicrophoneCapture` observes configuration changes before
+  the engine starts, so a Bluetooth headset switching profile during start is
+  handled once the start returns. Each resume builds a fresh `AVAudioEngine`
+  (the old one is torn down on the main actor), because the old input node can
+  keep its old format. Tap installation and start are wrapped in
+  `ExceptionCatcher`, so an Objective-C exception becomes "No microphone"
+  instead of a crash. A notification from an engine already replaced is
+  ignored, and the restart limit counts only restarts within five seconds of
+  each other.
+- **Stale renders.** A repeated sighting of the same unconfirmed draft no
+  longer postpones its deadline, so an outside write during streaming still
+  lands within half a second. An edit made after the draft was seen cancels
+  applying it. A programmatic replacement (send clearing the draft) now
+  remembers the replaced text, so a stale render cannot bring the sent text
+  back. A render ignored as stale no longer moves the selection.
+- **Publishing during view updates.** An outside replacement and the editor
+  going away end the bridge session at once but report the interruption on
+  the next main-queue turn, to the receiver installed at that moment. Typing,
+  paste, undo, and input-method changes still report synchronously.
+- **Send.** The editor's text, not the draft binding, is what is checked,
+  reconciled, and sent, since the binding can lag by an edit in Agent Home.
+  The fresh-Home clearing checks compare the editor's text too. Command-Return
+  with nothing to send no longer stops dictation.
+- **Conversation changes.** New conversation, History resume (both surfaces),
+  and opening a scheduled run freeze dictation explicitly.
+- **Mention separation** is decided when the editor is claimed, after any
+  permission prompt or model download, not when Start is clicked.
+- **The "can't dictate here" message** now fits every cause, not only an
+  input method composing.
+
+Still not verified: a real device change during capture (the restart path has
+only been compiled and reasoned against the AVFAudio headers), and none of
+these fixes has been exercised in the running app.
+
 ### Phase 6 — Language setting, docs, release gate
 
 - (Done in Phase 5.) `RubienPreferences.assistantDictationLocaleIdentifier`

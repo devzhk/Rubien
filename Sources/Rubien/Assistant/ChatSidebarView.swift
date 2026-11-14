@@ -214,7 +214,8 @@ struct ChatSurfaceView: View {
                 if let submitted = pendingFreshHomeDraft {
                     // Preserve edits made during the very short gate-acquisition
                     // window; clear only the exact draft that was committed.
-                    if draft == submitted || draft.isEmpty { resetDraft() }
+                    let shown = composerText
+                    if shown == submitted || shown.isEmpty { resetDraft() }
                     pendingFreshHomeDraft = nil
                 }
             } else {
@@ -287,6 +288,7 @@ struct ChatSurfaceView: View {
             }
             Spacer()
             let newConversation = {
+                dictation.freeze(owner: dictationOwner)
                 session.newConversation()
                 resetDraft()
                 homeResumeRequested = false
@@ -314,6 +316,7 @@ struct ChatSurfaceView: View {
                 .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
                     ChatHistoryPopover(session: session, surface: .home) {
                         showingHistory = false
+                        dictation.freeze(owner: dictationOwner)
                         resetDraft()
                         pendingFreshHomeDraft = nil
                         homeResumeRequested = true
@@ -345,6 +348,8 @@ struct ChatSurfaceView: View {
                             coordinator: scheduledJobs,
                             onOpenRun: { run in
                                 showingScheduledJobs = false
+                                // Every run opens in place of this composer.
+                                dictation.freeze(owner: dictationOwner)
                                 if run.status == .succeeded {
                                     resetDraft()
                                     pendingFreshHomeDraft = nil
@@ -364,6 +369,7 @@ struct ChatSurfaceView: View {
                 .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
                     ChatHistoryPopover(session: session, surface: .reader) {
                         showingHistory = false
+                        dictation.freeze(owner: dictationOwner)
                         resetDraft()
                     }
                 }
@@ -1086,9 +1092,10 @@ struct ChatSurfaceView: View {
                     owner: dictationOwner,
                     bridge: dictationBridge,
                     separatingFromPrecedingText: {
-                        bringMentionsUpToDate()
+                        let text = composerText
+                        bringMentionsUpToDate(with: text)
                         return PaperMentions.caretEndsMention(
-                            draftSelection, in: draft, mentions: selectedMentions)
+                            draftSelection, in: text, mentions: selectedMentions)
                     },
                     onStart: { editorFocusRequests += 1 })
                 composerButton
@@ -1695,13 +1702,13 @@ struct ChatSurfaceView: View {
 
     private func sendDraft() {
         // Send exactly the visible text, with mentions that match it.
-        dictation.freeze(owner: dictationOwner)
-        bringMentionsUpToDate()
-        guard session.canSend(draft: draft) else {
+        let text = composerText
+        guard session.canSend(draft: text) else {
             editorFocusRequests += 1
             return
         }
-        let text = draft
+        dictation.freeze(owner: dictationOwner)
+        bringMentionsUpToDate(with: text)
         let mentions = selectedMentions
         if configuration.isHome, !session.hasMessages {
             // The controller publishes `hasMessages` only after the global gate
@@ -1710,10 +1717,13 @@ struct ChatSurfaceView: View {
             pendingFreshHomeDraft = text
             // The Binding belongs to ContentView, not this transient Home subtree.
             // If the user switches to Library during gate acquisition, this still
-            // clears the committed text while preserving any later edit.
+            // clears the committed text while preserving any later edit. A
+            // queued send commits before returning, while the binding may still
+            // lag the editor, so the editor is asked first while it is attached.
             let externalDraft = $draft
+            let bridge = dictationBridge
             session.send(text, mentionedReferences: mentions) {
-                if externalDraft.wrappedValue == text {
+                if (bridge.editorText ?? externalDraft.wrappedValue) == text {
                     externalDraft.wrappedValue = ""
                 }
             }
@@ -1878,7 +1888,7 @@ struct ChatSurfaceView: View {
 
     private func completeMention(_ reference: ChatReference) {
         guard let query = activeMentionQuery else { return }
-        bringMentionsUpToDate()
+        bringMentionsUpToDate(with: draft)
         let completed = PaperMentions.completing(query, with: reference, in: draft)
         var mentions = PaperMentions.reconciling(
             selectedMentions,
@@ -1955,12 +1965,18 @@ struct ChatSurfaceView: View {
     }
 
     /// Applies an edit `onChange(of: draft)` has not handled yet, so the mentions
-    /// match the current draft. `onChange` then finds nothing left to apply.
-    private func bringMentionsUpToDate() {
-        guard let reconciled = mentionsReconciledDraft, reconciled != draft else { return }
+    /// match `text`. `onChange` then finds nothing left to apply.
+    private func bringMentionsUpToDate(with text: String) {
+        guard let reconciled = mentionsReconciledDraft, reconciled != text else { return }
         selectedMentions = PaperMentions.updating(
-            selectedMentions, reconciledAgainst: reconciled, to: draft)
-        mentionsReconciledDraft = draft
+            selectedMentions, reconciledAgainst: reconciled, to: text)
+        mentionsReconciledDraft = text
+    }
+
+    /// The text the composer shows. The draft binding can lag the editor by an
+    /// edit in Agent Home, whose draft is owned several views up.
+    private var composerText: String {
+        dictationBridge.editorText ?? draft
     }
 
     private var isDictating: Bool {

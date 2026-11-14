@@ -84,11 +84,15 @@ final class DictationController: ObservableObject {
 
     /// Starts dictating into `bridge`'s editor. A session that is already
     /// running, for this or any other surface, is frozen first.
+    ///
+    /// - Parameter separatingFromPrecedingText: Asked just before the editor
+    ///   is claimed, after any permission prompt or model download, since the
+    ///   caret can move during those. See `ComposerDictationBridge.begin`.
     func start(
         owner: Owner,
         bridge: ComposerDictationBridge,
         locale: Locale,
-        separatingFromPrecedingText: Bool = false
+        separatingFromPrecedingText: @escaping @MainActor () -> Bool = { false }
     ) {
         freezeAll()
         failure = nil
@@ -146,7 +150,7 @@ final class DictationController: ObservableObject {
     private func run(
         _ session: Session,
         locale: Locale,
-        separatingFromPrecedingText: Bool
+        separatingFromPrecedingText: @MainActor () -> Bool
     ) async {
         // Every await below can outlast the session; each is followed by a
         // check that this session is still the current one.
@@ -180,7 +184,7 @@ final class DictationController: ObservableObject {
 
             // Claim the editor before opening the microphone, so a composer
             // that cannot take text never starts a recording.
-            guard session.bridge.begin(separatingFromPrecedingText: separatingFromPrecedingText)
+            guard session.bridge.begin(separatingFromPrecedingText: separatingFromPrecedingText())
             else { throw DictationFailure.editorUnavailable }
             guard isCurrent(session) else {
                 // Ended from an editor callback while the editor was being

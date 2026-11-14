@@ -8,7 +8,8 @@ struct ComposerDictationButton: View {
     @ObservedObject var controller: DictationController
     let owner: DictationController.Owner
     let bridge: ComposerDictationBridge
-    /// Asked at each start: whether the caret sits at the end of a selected mention.
+    /// Whether the caret sits at the end of a selected mention. The controller
+    /// asks just before dictation claims the editor.
     let separatingFromPrecedingText: () -> Bool
     let onStart: () -> Void
 
@@ -122,7 +123,7 @@ struct ComposerDictationButton: View {
             owner: owner,
             bridge: bridge,
             locale: DictationLanguage.startLocale(),
-            separatingFromPrecedingText: separatingFromPrecedingText())
+            separatingFromPrecedingText: separatingFromPrecedingText)
         onStart()
     }
 
@@ -182,7 +183,7 @@ extension DictationFailure {
         case .noMicrophone:
             return "Rubien couldn’t find a microphone, or the input device changed and dictation couldn’t continue. Check your microphone and try again."
         case .editorUnavailable:
-            return "Finish the text you’re typing, then try again."
+            return "The message field couldn’t take dictated text. If an input method is composing text, confirm or cancel it, then try again."
         case .recognitionFailed(let detail):
             let detail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
             return detail.isEmpty

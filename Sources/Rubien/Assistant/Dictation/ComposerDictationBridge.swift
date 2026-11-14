@@ -83,11 +83,12 @@ enum DictationInsertion {
 /// which resets the caret and undo history and can overwrite a concurrent edit.
 @MainActor
 final class ComposerDictationBridge {
-    /// Runs synchronously before a text change the bridge did not make is
-    /// applied: typing, paste, undo, input-method composition, an outside draft
-    /// replacement, or the editor going away. The session has already ended by
-    /// then, so a transcript update that arrives late is ignored and the other
-    /// change always wins.
+    /// Reports that a change the bridge did not make ended the session. Runs
+    /// synchronously before typing, paste, undo, or input-method composition is
+    /// applied; after an outside draft replacement or the editor going away, it
+    /// runs on the next main-queue turn (see `interrupt`). The session has
+    /// already ended either way, so a transcript update that arrives late is
+    /// ignored and the other change always wins.
     var onInterruption: (() -> Void)?
 
     /// A class because the session's undo action reads the final range when it
@@ -122,6 +123,10 @@ final class ComposerDictationBridge {
     private var isValidatingOwnEdit = false
 
     var isActive: Bool { session != nil }
+
+    /// The attached editor's text, or nil when no editor is attached. Ahead of
+    /// the draft binding, which can lag the editor by an edit.
+    var editorText: String? { textView?.string }
 
     // MARK: Session
 
@@ -212,13 +217,24 @@ final class ComposerDictationBridge {
     }
 
     /// Ends the session because another change is about to be applied.
-    func interrupt() {
+    ///
+    /// - Parameter deferringNotification: Report the interruption on the next
+    ///   main-queue turn instead of now. For callers inside a SwiftUI view
+    ///   update, where the receiver must not publish changes. The session still
+    ///   ends now, and the notification goes to the receiver installed now, not
+    ///   to one a new session installs in between.
+    func interrupt(deferringNotification: Bool = false) {
         guard session != nil else { return }
         #if DEBUG
         DictationSelfTest.interruptionTrace?(Thread.callStackSymbols)
         #endif
         end()
-        onInterruption?()
+        guard let onInterruption else { return }
+        if deferringNotification {
+            DispatchQueue.main.async { onInterruption() }
+        } else {
+            onInterruption()
+        }
     }
 
     // MARK: Editor hooks
@@ -232,9 +248,10 @@ final class ComposerDictationBridge {
         self.textView = textView
     }
 
+    /// Linking and unlinking happen inside SwiftUI view updates.
     func detach(from textView: ComposerNSTextView) {
         guard self.textView === textView else { return }
-        interrupt()
+        interrupt(deferringNotification: true)
         self.textView = nil
     }
 

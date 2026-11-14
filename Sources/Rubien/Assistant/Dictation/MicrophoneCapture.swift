@@ -1,5 +1,6 @@
 #if os(macOS)
 import AVFoundation
+import RubienExceptionCatcher
 
 /// The default input device, through `AVAudioEngine`.
 @MainActor
@@ -11,41 +12,85 @@ final class MicrophoneCapture: DictationAudioSource {
     private static let bufferLimit = 96
     private static let tapBufferSize: AVAudioFrameCount = 4096
     /// A device that keeps reconfiguring must not restart capture forever.
+    /// Restarts further apart than `restartWindow` start a new count.
     private static let restartLimit = 3
+    private static let restartWindow: Duration = .seconds(5)
 
     let needsMicrophone = true
 
     private var engine: AVAudioEngine?
+    /// Identifies `engine`, so a change reported by an engine already replaced
+    /// does not restart its successor.
+    private var engineGeneration = 0
     private var isTapInstalled = false
     private var configurationObserver: NSObjectProtocol?
     private var continuation: Continuation?
     private var isStopped = false
+    private var hasStarted = false
     private var restarts = 0
+    private var lastRestart: ContinuousClock.Instant?
 
     func start() throws -> AsyncThrowingStream<AVAudioPCMBuffer, Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(
             of: AVAudioPCMBuffer.self, bufferingPolicy: .bufferingNewest(Self.bufferLimit))
-        guard !isStopped, engine == nil else {
+        guard !isStopped, !hasStarted, engine == nil else {
             continuation.finish()
             return stream
         }
-        let engine = AVAudioEngine()
-        self.engine = engine
         self.continuation = continuation
         do {
-            try startCapturing(engine, into: continuation)
-            configurationObserver = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil,
-                using: Self.configurationChangeHandler(for: self))
+            try startEngine(into: continuation)
         } catch {
             stop()
             throw (error as? DictationFailure) ?? .noMicrophone
         }
+        // A change reported while the engine was starting is handled on the
+        // main actor, which this method holds, so it runs after this point.
+        hasStarted = true
         return stream
     }
 
     func stop() {
         isStopped = true
+        tearDownEngine()
+        continuation?.finish()
+        continuation = nil
+    }
+
+    /// Builds a new engine and starts capturing from it. A device change can
+    /// leave an engine's input node with the old format, and installing a tap
+    /// or starting with a format that no longer matches the hardware raises an
+    /// Objective-C exception, which Swift cannot catch.
+    private func startEngine(into continuation: Continuation) throws {
+        let engine = AVAudioEngine()
+        engineGeneration += 1
+        self.engine = engine
+        // Observed before starting: a Bluetooth headset can switch profile as
+        // its input opens, which is during `start()`.
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil,
+            using: Self.configurationChangeHandler(for: self, generation: engineGeneration))
+
+        var failure: Error?
+        let exception = ExceptionCatcher.catchException {
+            let input = engine.inputNode
+            let hardwareFormat = input.inputFormat(forBus: 0)
+            guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
+                failure = DictationFailure.noMicrophone
+                return
+            }
+            input.installTap(
+                onBus: 0, bufferSize: Self.tapBufferSize, format: nil,
+                block: Self.tapBlock(yieldingTo: continuation))
+            isTapInstalled = true
+            engine.prepare()
+            do { try engine.start() } catch { failure = error }
+        }
+        if exception != nil { throw DictationFailure.noMicrophone }
+        if let failure { throw failure }
+    }
+
+    private func tearDownEngine() {
         if let configurationObserver {
             NotificationCenter.default.removeObserver(configurationObserver)
         }
@@ -56,42 +101,27 @@ final class MicrophoneCapture: DictationAudioSource {
         }
         isTapInstalled = false
         engine = nil
-        continuation?.finish()
-        continuation = nil
-    }
-
-    private func startCapturing(_ engine: AVAudioEngine, into continuation: Continuation) throws {
-        let input = engine.inputNode
-        if isTapInstalled {
-            input.removeTap(onBus: 0)
-            isTapInstalled = false
-        }
-        // Using an input node whose hardware format is empty raises an
-        // exception rather than an error.
-        let hardwareFormat = input.inputFormat(forBus: 0)
-        guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
-            throw DictationFailure.noMicrophone
-        }
-        input.installTap(
-            onBus: 0, bufferSize: Self.tapBufferSize, format: nil,
-            block: Self.tapBlock(yieldingTo: continuation))
-        isTapInstalled = true
-        engine.prepare()
-        try engine.start()
     }
 
     /// The engine stops itself when the input device or its format changes,
     /// which includes a Bluetooth headset switching to its call profile as
-    /// recording begins. Capture resumes on the new configuration; the tap is
-    /// reinstalled because its format belongs to the old one.
-    private func resumeAfterConfigurationChange() {
-        guard !isStopped, let engine, let continuation else { return }
+    /// recording begins. Capture resumes on a new engine built for the new
+    /// configuration.
+    private func resumeAfterConfigurationChange(generation: Int) {
+        guard !isStopped, hasStarted, generation == engineGeneration, let continuation else { return }
+        let now = ContinuousClock.now
+        if let lastRestart, now - lastRestart > Self.restartWindow { restarts = 0 }
         restarts += 1
+        lastRestart = now
+        tearDownEngine()
         do {
             guard restarts <= Self.restartLimit else { throw DictationFailure.noMicrophone }
-            try startCapturing(engine, into: continuation)
+            try startEngine(into: continuation)
         } catch {
-            // `stop()` cleans up later, on the consumer's path.
+            // Without a continuation, a later change cannot reopen the input
+            // before the consumer's `stop()` arrives.
+            tearDownEngine()
+            self.continuation = nil
             continuation.finish(throwing: DictationFailure.noMicrophone)
         }
     }
@@ -102,10 +132,11 @@ final class MicrophoneCapture: DictationAudioSource {
     /// Tearing the engine down inside this handler can deadlock, so it only
     /// hands off to the main actor.
     nonisolated private static func configurationChangeHandler(
-        for capture: MicrophoneCapture
+        for capture: MicrophoneCapture,
+        generation: Int
     ) -> @Sendable (Notification) -> Void {
         { [weak capture] _ in
-            Task { @MainActor in capture?.resumeAfterConfigurationChange() }
+            Task { @MainActor in capture?.resumeAfterConfigurationChange(generation: generation) }
         }
     }
 

@@ -420,19 +420,9 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onAttachImageData = onAttachImageData
         textView.onDragTargeted = onDragTargeted
         textView.dictationBridge = dictationBridge
-        context.coordinator.syncExternalText(text, into: textView)
-
-        if selection != context.coordinator.lastSyncedSelection,
-           let selection,
-           let nativeRange = Self.nativeRange(for: selection, in: text) {
-            context.coordinator.lastSyncedSelection = selection
-            textView.setSelectedRange(nativeRange)
-            textView.scrollRangeToVisible(nativeRange)
-        } else if selection == nil {
-            context.coordinator.lastSyncedSelection = nil
-        }
-
         let coordinator = context.coordinator
+        coordinator.syncExternalState(text: text, selection: selection, into: textView)
+
         if focusRequestCount != coordinator.honoredFocusRequestCount {
             let requested = focusRequestCount
             // Defer out of the SwiftUI update pass; responder changes relayout.
@@ -464,6 +454,9 @@ struct ComposerTextView: NSViewRepresentable {
         /// A draft that matched one of those and may yet be an outside write.
         private var unresolvedDraft: String?
         private var unresolvedDraftCheck = 0
+        /// Counts the editor's own edits, so a pending outside write that an
+        /// edit has since superseded is not applied over it.
+        private var editCount = 0
         /// How long a draft equal to one of this editor's previous texts may go
         /// unconfirmed before it is taken for an outside write after all.
         var staleRenderGrace: TimeInterval = 0.5
@@ -478,9 +471,31 @@ struct ComposerTextView: NSViewRepresentable {
             lastSyncedSelection = parent.selection
         }
 
+        /// Adopts a render's draft and selection. A selection is only meaningful
+        /// against the text it was measured in, so a render whose text is
+        /// ignored as stale leaves the selection alone too.
+        func syncExternalState(
+            text: String,
+            selection: Range<Int>?,
+            into textView: ComposerNSTextView
+        ) {
+            guard syncExternalText(text, into: textView) else { return }
+            if selection != lastSyncedSelection,
+               let selection,
+               let nativeRange = ComposerTextView.nativeRange(for: selection, in: text) {
+                lastSyncedSelection = selection
+                textView.setSelectedRange(nativeRange)
+                textView.scrollRangeToVisible(nativeRange)
+            } else if selection == nil {
+                lastSyncedSelection = nil
+            }
+        }
+
         /// Adopts a draft written from outside the editor (send cleared it, the
-        /// conversation switched, a mention was completed).
-        func syncExternalText(_ text: String, into textView: ComposerNSTextView) {
+        /// conversation switched, a mention was completed). Returns false when
+        /// the draft is ignored as a stale render, so the editor's text stands.
+        @discardableResult
+        func syncExternalText(_ text: String, into textView: ComposerNSTextView) -> Bool {
             // Compare against the cache, not `textView.string` — the latter bridges
             // the whole text storage to a fresh String on every render (and this
             // runs per streaming tick); the cache stays COW-identical to the
@@ -488,7 +503,7 @@ struct ComposerTextView: NSViewRepresentable {
             guard text != lastSyncedText else {
                 unconfirmedPreviousTexts.removeAll()
                 unresolvedDraft = nil
-                return
+                return true
             }
             // SwiftUI can re-render the editor with the draft from before an
             // edit it just published, then again with the new one. It happens
@@ -498,35 +513,53 @@ struct ComposerTextView: NSViewRepresentable {
             // the draft cannot be read back reliably at this point, so the echo
             // is only acted on if no render confirms the editor's text in time.
             if unconfirmedPreviousTexts.contains(text) {
-                unresolvedDraft = text
-                unresolvedDraftCheck += 1
-                let check = unresolvedDraftCheck
-                DispatchQueue.main.asyncAfter(deadline: .now() + staleRenderGrace) { [weak self, weak textView] in
-                    guard let self, let textView, self.unresolvedDraftCheck == check,
-                          let draft = self.unresolvedDraft
-                    else { return }
-                    if draft != self.lastSyncedText { self.replaceText(with: draft, in: textView) }
-                }
-                return
+                // The surface re-renders per streaming tick; seeing the same
+                // value again must not postpone its deadline.
+                if unresolvedDraft != text { armStaleRenderCheck(for: text, in: textView) }
+                return false
             }
             replaceText(with: text, in: textView)
+            return true
+        }
+
+        private func armStaleRenderCheck(for draft: String, in textView: ComposerNSTextView) {
+            unresolvedDraft = draft
+            unresolvedDraftCheck += 1
+            let check = unresolvedDraftCheck
+            let edits = editCount
+            DispatchQueue.main.asyncAfter(deadline: .now() + staleRenderGrace) { [weak self, weak textView] in
+                guard let self, let textView, self.unresolvedDraftCheck == check,
+                      let draft = self.unresolvedDraft
+                else { return }
+                // The binding already carries the newer edit.
+                guard self.editCount == edits else {
+                    self.unresolvedDraft = nil
+                    return
+                }
+                if draft != self.lastSyncedText { self.replaceText(with: draft, in: textView) }
+            }
         }
 
         private func replaceText(with text: String, in textView: ComposerNSTextView) {
             // Assigning `string` bypasses the text view's change validation.
-            textView.dictationBridge?.interrupt()
+            // This runs inside a view update, where the session's owner must
+            // not publish changes.
+            textView.dictationBridge?.interrupt(deferringNotification: true)
             // Replace wholesale and drop undo history — undoing across a
             // programmatic replacement restores text the user never typed here.
             textView.string = text
+            // A render still carrying the replaced text is stale, like one
+            // carrying text the editor's own edits replaced.
+            unconfirmedPreviousTexts = lastSyncedText == text ? [] : [lastSyncedText]
             lastSyncedText = text
             lastSyncedSelection = nil
-            unconfirmedPreviousTexts.removeAll()
             unresolvedDraft = nil
             undoManager.removeAllActions()
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
+            editCount += 1
             let latest = textView.string
             if latest != lastSyncedText {
                 // A few entries are plenty: each is confirmed by the next render.
