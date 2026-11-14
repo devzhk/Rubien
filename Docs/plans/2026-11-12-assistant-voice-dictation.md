@@ -10,6 +10,46 @@ Revision 2 (2026-11-12). Revised after an independent Codex review
 findings were checked against the code and SDK headers and all are adopted;
 see "Changes from revision 1" at the end.
 
+## Status (2026-11-13)
+
+Implemented on the local branch `assistant-voice-dictation` (13 commits on top
+of `main`, not pushed, not released). The status subsections under each phase
+below have the detail; this is the summary.
+
+Works, verified by driving the real UI in the preview app with recorded audio
+(`DictationSelfTest`, see "Orchestrator review and end-to-end check of
+Phase 5"): the button in the reader sidebar surface and in Agent Home, live
+text, Stop, undo and redo, typing while listening, Command-Return while
+listening, hand-off between two windows, the failure popover, a first-time
+model download, and Chinese as well as English. Unit tests cover the editor
+bridge, the controller, the transcript accumulator, the audio sources, and the
+mention handling; opt-in live tests run the real recognizer on a checked-in
+recording. A Release configuration compiles and contains none of the
+debug-only test hooks.
+
+Not verified, in order of importance:
+
+1. **The real microphone.** `MicrophoneCapture` has never captured audio. The
+   self-test reached the macOS permission prompt in the preview app and timed
+   out waiting for a person to answer it. To check: run
+   `./scripts/preview-app.sh`, click the microphone in the Home composer,
+   allow the prompt, and speak.
+2. **Device changes during capture** (plugging in or switching a headset,
+   Bluetooth profile switches). The recovery code follows the AVFAudio headers
+   and is guarded against exceptions, but has never run.
+3. **A Developer ID signed, Hardened Runtime build.** The release runbook now
+   has a microphone gate for this; the provisioning profile's acceptance of
+   the `audio-input` entitlement is only settled there.
+4. The Settings picker on screen, real reader windows (the harness uses the
+   same surface), and agent microphone inheritance in Rubien's own bundle
+   (confirmed with a stand-in app in Phase 1).
+
+Scope decisions taken along the way: macOS 26 or later only (the
+`SFSpeechRecognizer` backend is deferred because it could not be verified
+here); moving the caret does not end dictation, only a text change does; text
+dictated between straight double quotes gains inner spaces (cosmetic, left
+as is).
+
 ## Scope
 
 - Speech-to-text into the composer draft, in every place the composer appears:
