@@ -110,6 +110,15 @@ enum DictationSelfTest {
         // MARK: Scenarios
 
         mutating func execute() async {
+            // Every interruption is recorded, so a session that ends when it
+            // should not can be explained from the report.
+            let started = ContinuousClock.now
+            DictationSelfTest.interruptionTraces = []
+            DictationSelfTest.interruptionTrace = { frames in
+                let elapsed = (ContinuousClock.now - started).formatted(.units(allowed: [.seconds], fractionalPart: .show(length: 2)))
+                DictationSelfTest.interruptionTraces.append(["at \(elapsed)"] + frames)
+            }
+            defer { DictationSelfTest.interruptionTrace = nil }
             do {
                 AssistantSidebarHarnessWindowController.shared.show()
                 let window = try await waitFor("harness window") {
@@ -132,7 +141,9 @@ enum DictationSelfTest {
                 let names = DictationLanguage.options(supported: languages, storedIdentifier: nil).map(\.name)
                 note("\(languages.count) dictation languages, starting in \(DictationLanguage.startLocale().identifier); first: \(names.prefix(6).joined(separator: ", "))")
 
-                if expectsFailure {
+                if let widths = ProcessInfo.processInfo.environment["RUBIEN_DICTATION_SELFTEST_WIDTHS"] {
+                    try await snapshotWidths(widths, window: window, editor: editor)
+                } else if expectsFailure {
                     try await failureIsShown(window: window, editor: editor)
                 } else {
                     try await dictateAndStop(window: window, editor: editor)
@@ -143,6 +154,10 @@ enum DictationSelfTest {
                 }
             } catch let failure as Failed {
                 check("self-test completed", false, failure.reason)
+                for trace in DictationSelfTest.interruptionTraces {
+                    let frames = trace.prefix(16).map { String($0.prefix(170)) }
+                    note("interruption: " + frames.joined(separator: " | "))
+                }
             } catch {
                 check("self-test completed", false, "\(error)")
             }
@@ -316,8 +331,6 @@ enum DictationSelfTest {
             second.window.makeKeyAndOrderFront(nil)
             try await Task.sleep(for: .milliseconds(400))
             clear(second.editor)
-            DictationSelfTest.interruptionTraces = []
-            DictationSelfTest.interruptionTrace = { DictationSelfTest.interruptionTraces.append($0) }
             try click(second.window, second.editor)
             try await waitUntil("the second window to take over", timeout: 60) {
                 controller.owner != nil && controller.owner != firstOwner && controller.state == .listening
@@ -329,11 +342,6 @@ enum DictationSelfTest {
             check("the first window gets no more text", editor.string == kept, "\"\(editor.string)\"")
             check("the second window receives the dictation", true, "\"\(second.editor.string)\"")
             note("controller after 1 s in the second window: \(controller.state), owner set \(controller.owner != nil); editor identity \(ObjectIdentifier(second.editor)) vs now \(Self.editor(in: second.window).map { ObjectIdentifier($0) }.map(String.init(describing:)) ?? "none")")
-            for (index, trace) in DictationSelfTest.interruptionTraces.enumerated() {
-                let frames = trace.prefix(22).map { String($0.dropFirst(4).prefix(150)) }
-                note("interruption \(index): " + frames.joined(separator: " | "))
-            }
-            DictationSelfTest.interruptionTrace = nil
             check("the second window's button shows listening",
                   Self.renderedState(for: second.editor) == .listening,
                   "drew \(String(describing: Self.renderedState(for: second.editor)))")
@@ -354,6 +362,27 @@ enum DictationSelfTest {
                   Self.contains(second.editor.string, expected), "\"\(second.editor.string)\"")
             clear(second.editor)
             clear(editor)
+        }
+
+        /// Snapshots the control row at each requested content width, idle and
+        /// while a response streams (when the Stop button takes room too).
+        private mutating func snapshotWidths(
+            _ list: String,
+            window: NSWindow,
+            editor: ComposerNSTextView
+        ) async throws {
+            for width in list.split(separator: ",").compactMap({ Double($0) }) {
+                window.setContentSize(NSSize(width: width, height: 620))
+                try await Task.sleep(for: .milliseconds(500))
+                snapshot(window, "w\(Int(width))-idle")
+                clear(editor)
+                editor.insertText("hi", replacementRange: editor.selectedRange())
+                editor.onCommandReturn()
+                try await Task.sleep(for: .milliseconds(350))
+                snapshot(window, "w\(Int(width))-responding")
+                try await Task.sleep(for: .seconds(4))
+            }
+            check("width snapshots written", true, list)
         }
 
         /// A start that cannot succeed reports why, in a popover on the button.

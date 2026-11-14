@@ -7,7 +7,7 @@ import Speech
 enum DictationEngines {
     /// Whether this system has an engine at all. The analyzer engines need
     /// macOS 26; the older recognizer is not offered.
-    static var isSupported: Bool {
+    nonisolated static var isSupported: Bool {
         if #available(macOS 26.0, *) { return true }
         return false
     }

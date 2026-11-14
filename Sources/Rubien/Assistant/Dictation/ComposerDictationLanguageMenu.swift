@@ -1,7 +1,7 @@
 #if os(macOS)
 import SwiftUI
 
-/// The composer's dictation-language switch, beside the microphone: a short
+/// The composer's dictation-language switch, in the microphone's tile: a short
 /// code for the language the next dictation starts in ("EN", "中"), opening a
 /// menu of the system language, a quick list, and every supported language.
 /// Absent below macOS 26, like the microphone.
@@ -11,8 +11,6 @@ struct ComposerDictationLanguageMenu: View {
     /// Loaded once by the surface; empty until then, when the menu still lists
     /// "System Language" and the current choice.
     let languages: DictationLanguageLists
-    /// Off in the control row's most compact layouts.
-    var showsChevron = true
     let fontSize: CGFloat
 
     /// The same storage as `RubienPreferences.assistantDictationLocaleIdentifier`
@@ -55,8 +53,11 @@ struct ComposerDictationLanguageMenu: View {
             // ONE concatenated Text, like the other composer pickers: an HStack
             // of Texts does not render reliably in a borderless Menu label.
             labelText
-                .padding(.horizontal, 6)
-                .frame(height: 24)
+                // Tight on the leading side: the label continues the
+                // microphone's tile rather than standing alone.
+                .padding(.leading, 2)
+                .padding(.trailing, 7)
+                .frame(height: 27)
                 .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
@@ -96,16 +97,13 @@ struct ComposerDictationLanguageMenu: View {
     }
 
     private var labelText: Text {
-        var text = Text(verbatim: DictationLanguage.shortCode(for: startLocale.identifier(.bcp47)))
+        (Text(verbatim: DictationLanguage.shortCode(for: startLocale.identifier(.bcp47)))
             .foregroundStyle(Color.primary.opacity(0.80))
-        if showsChevron {
-            text = text
-                + Text(" ")
-                + Text(Image(systemName: "chevron.down"))
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.secondary)
-        }
-        return text.font(.system(size: fontSize))
+            + Text(" ")
+            + Text(Image(systemName: "chevron.down"))
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary))
+            .font(.system(size: fontSize))
     }
 
     /// A menu row's checkmark: on for the current choice. Choosing the row that

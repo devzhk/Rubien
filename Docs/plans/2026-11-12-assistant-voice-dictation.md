@@ -806,6 +806,30 @@ measured text widths, not from the rendered row; the menu, its checkmarks,
 its submenu, and the layouts the row picks have not been seen, nor has the
 menu following a change made in another window or in Settings.
 
+Voice tile and sidebar width (2026-11-13, owning session, after rendering the
+row at several widths in the preview app). This supersedes the layout details
+in the language-switcher note above.
+
+- **One tile for voice.** The microphone and the language menu share a lightly
+  filled tile ("mic, EN, chevron"), apart from the plain-text pickers, so the
+  language reads as the voice's and not as the model's or the reply's. The
+  developer asked for exactly that distinction and approved the render. The
+  tile sits outside the adaptive part of the row, so the language label is
+  always code plus chevron and the "language code only" density was removed.
+- **Real widths, not estimates.** Rendered at 420 points the full row fits
+  while idle and loses only the model's effort word while a response streams.
+  At 460 everything fits in both states.
+- **Default width.** Readers now open the panel at
+  `AssistantSidebarMetrics.defaultWidth`: 460 where dictation is available,
+  420 otherwise. The minimum stays 420.
+- **No label changes when a response starts.** While idle, the row's flexible
+  gap keeps room for the Stop button, so the density chosen is the same in
+  both states.
+- `DictationEngines.isSupported` is `nonisolated` so layout metrics can use it.
+- The self-test gained a width mode (`RUBIEN_DICTATION_SELFTEST_WIDTHS`) that
+  snapshots the row idle and responding at each width, and it now records
+  every interruption's call stack for the report.
+
 ### Phase 6 — Language setting, docs, release gate
 
 - (Done in Phase 5.) `RubienPreferences.assistantDictationLocaleIdentifier`

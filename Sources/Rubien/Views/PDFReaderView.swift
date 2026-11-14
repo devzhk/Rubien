@@ -496,7 +496,7 @@ struct PDFReaderView: View {
     // window; visible pane state is window-local while transcript content is durable. Floats as a card over
     // the content (details-panel idiom), not a docked pane.
     @State private var showChatSidebar: Bool
-    @State private var chatPanelWidth: CGFloat = AssistantSidebarMetrics.minimumWidth
+    @State private var chatPanelWidth: CGFloat = AssistantSidebarMetrics.defaultWidth
 
     @StateObject private var assistant: ReaderAssistantState
 

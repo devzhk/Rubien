@@ -1091,14 +1091,9 @@ struct ChatSurfaceView: View {
                     controlRowMenus(.full)
                     controlRowMenus(.modelWithoutEffort)
                     controlRowMenus(.approvalIconOnly)
-                    controlRowMenus(.languageCodeOnly)
                     controlRowMenus(.withoutChevrons)
                 }
-                ComposerDictationButton(
-                    controller: dictation,
-                    owner: dictationOwner,
-                    bridge: dictationBridge,
-                    toggle: { _ = toggleDictation() })
+                dictationControls
                 composerButton
             }
             .task {
@@ -1321,14 +1316,15 @@ struct ChatSurfaceView: View {
     /// Each step keeps every earlier step's shortening. Only labels change; every
     /// menu and its contents stay. At the sidebar's minimum width the worst case
     /// (Codex, a long model name, Agent approvals, responding) needs the last one.
+    /// The Stop button and its gap to Send, which appear only while responding.
+    private static let stopButtonFootprint: CGFloat = 27 + 5
+
     private enum ControlRowDensity: Int, Comparable {
         case full
         /// The model picker drops its effort word.
         case modelWithoutEffort
         /// The approval picker drops its word ("Ask", "Auto", "Agent").
         case approvalIconOnly
-        /// The language menu drops its chevron.
-        case languageCodeOnly
         /// The approval, provider, and model pickers drop their chevrons.
         case withoutChevrons
 
@@ -1339,16 +1335,36 @@ struct ChatSurfaceView: View {
     private func controlRowMenus(_ density: ControlRowDensity) -> some View {
         HStack(spacing: 8) {
             approvalPicker(density)
-            // No minimum, so a tight row spends this gap before shortening labels.
-            Spacer(minLength: 0)
+            // Otherwise no minimum, so a tight row spends this gap before
+            // shortening labels. While idle the gap keeps room for the Stop
+            // button, so the labels chosen do not change each time a response
+            // starts and ends.
+            Spacer(minLength: session.isResponding ? 0 : Self.stopButtonFootprint)
             providerPicker(density)
             modelPicker(density)
-            ComposerDictationLanguageMenu(
-                controller: dictation,
-                owner: dictationOwner,
-                languages: dictationLanguages,
-                showsChevron: density < .languageCodeOnly,
-                fontSize: ChatSurfaceTypography.controlFontSize)
+        }
+    }
+
+    /// The microphone and its language share one tile, apart from the plain-text
+    /// pickers, so the language reads as the voice's and not as the model's or
+    /// the reply's.
+    @ViewBuilder private var dictationControls: some View {
+        if DictationEngines.isSupported {
+            HStack(spacing: 0) {
+                ComposerDictationButton(
+                    controller: dictation,
+                    owner: dictationOwner,
+                    bridge: dictationBridge,
+                    toggle: { _ = toggleDictation() })
+                ComposerDictationLanguageMenu(
+                    controller: dictation,
+                    owner: dictationOwner,
+                    languages: dictationLanguages,
+                    fontSize: ChatSurfaceTypography.controlFontSize)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.05)))
         }
     }
 
@@ -2074,6 +2090,11 @@ enum AssistantSidebarMetrics {
     /// labels and send control from crowding or forcing the panel wider than its
     /// resize binding reports.
     static let minimumWidth: CGFloat = 420
+    /// The width a reader opens the panel at. Where dictation is available the
+    /// control row also carries the language menu and the microphone, and needs
+    /// this much to show every label in full while a response is streaming.
+    /// Narrower than this, down to the minimum, the row shortens its labels.
+    static var defaultWidth: CGFloat { DictationEngines.isSupported ? 460 : minimumWidth }
     static let maximumWidth: CGFloat = 900
     static let widthRange: ClosedRange<CGFloat> = minimumWidth...maximumWidth
 }

@@ -33,7 +33,7 @@ enum WebReaderMetrics {
     static let defaultAnnotationSidebarWidth: CGFloat = 225
     static let sidebarVisibleDividerWidth: CGFloat = 1
     static let sidebarResizeHitTargetWidth = ReaderResizeMetrics.hitTargetWidth
-    static let defaultChatPanelWidth = AssistantSidebarMetrics.minimumWidth
+    static let defaultChatPanelWidth = AssistantSidebarMetrics.defaultWidth
     static let chatTrailingInset: CGFloat = 12
     static let minimumWindowHeight: CGFloat = 620
 
