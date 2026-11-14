@@ -410,6 +410,13 @@ struct ComposerTextView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
+    /// What a new editor starts from. A surface that has had an editor hands
+    /// over that editor's text: Agent Home builds a new editor when its
+    /// composer docks or returns to the start page, and the draft that render
+    /// carries can be out of date. A surface's first editor starts from the
+    /// draft.
+    var initialText: String { dictationBridge?.retainedEditorText ?? text }
+
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
@@ -421,7 +428,8 @@ struct ComposerTextView: NSViewRepresentable {
 
         let textView = Self.makeTextView()
         textView.delegate = context.coordinator
-        textView.string = text
+        context.coordinator.textView = textView
+        textView.string = initialText
         textView.onCommandReturn = onCommandReturn
         textView.onNavigationKey = onNavigationKey
         textView.onAttachFiles = onAttachFiles
@@ -476,11 +484,24 @@ struct ComposerTextView: NSViewRepresentable {
         /// Editor-private undo stack — the window's shared undo manager would let
         /// ⌘Z in the composer unwind other views' registrations (and vice versa).
         let undoManager = UndoManager()
+        /// The editor this coordinator serves, for publishing a change the
+        /// text view does not announce (see `undoManagerDidUndoOrRedo`).
+        weak var textView: NSTextView?
+        /// The text last published to the draft, or nil when a replacement
+        /// has left the draft to its caller.
+        private var lastPublishedText: String?
 
         init(_ parent: ComposerTextView) {
             self.parent = parent
             honoredFocusRequestCount = parent.focusRequestCount
             lastSyncedSelection = parent.selection
+            super.init()
+            // Selector-based observers are removed when the observer goes away.
+            for name in [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange] {
+                NotificationCenter.default.addObserver(
+                    self, selector: #selector(undoManagerDidUndoOrRedo(_:)),
+                    name: name, object: undoManager)
+            }
         }
 
         /// What a render applies to an existing editor: callbacks, the
@@ -543,12 +564,28 @@ struct ComposerTextView: NSViewRepresentable {
             // The next selection the surface sets is applied even if it equals
             // the cached one, which was measured in the replaced text.
             lastSyncedSelection = nil
+            lastPublishedText = nil
             undoManager.removeAllActions()
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            parent.text = textView.string
+            publishText(from: textView)
+        }
+
+        /// The text view undoes and redoes typed text without a text-change
+        /// notification, which would leave the draft holding the text from
+        /// before. Dictation's own undo step does notify, so the text is
+        /// published here only when it differs from what the draft has.
+        @objc private func undoManagerDidUndoOrRedo(_ notification: Notification) {
+            guard let textView, textView.string != lastPublishedText else { return }
+            publishText(from: textView)
+        }
+
+        private func publishText(from textView: NSTextView) {
+            let latest = textView.string
+            lastPublishedText = latest
+            parent.text = latest
             syncSelection(from: textView)
         }
 

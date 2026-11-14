@@ -148,6 +148,7 @@ enum DictationSelfTest {
                 } else {
                     try await dictateAndStop(window: window, editor: editor)
                     try await typingFreezes(window: window, editor: editor)
+                    try await undoReachesTheDraft(window: window, editor: editor)
                     try await sendFreezes(window: window, editor: editor)
                     try await shortcutToggles(window: window, editor: editor)
                     try await handoffBetweenWindows(window: window, editor: editor)
@@ -243,6 +244,34 @@ enum DictationSelfTest {
             check("typed text is kept", frozen.hasSuffix("!"), "\"\(frozen)\"")
             try await Task.sleep(for: .seconds(2))
             check("no dictated text arrives after typing", editor.string == frozen, "\"\(editor.string)\"")
+        }
+
+        /// Undoing typed text reaches the SwiftUI draft. The composer's height
+        /// follows the draft, not the editor, so it is the draft that is
+        /// measured here. The empty composer is sized by its hints and is not
+        /// the shortest state.
+        private mutating func undoReachesTheDraft(window: NSWindow, editor: ComposerNSTextView) async throws {
+            guard !usesMicrophone, let scrollView = editor.enclosingScrollView else { return }
+            clear(editor)
+            try await Task.sleep(for: .milliseconds(600))
+            let empty = scrollView.frame.height
+            editor.undoManager?.removeAllActions()
+            editor.insertText("one\ntwo\nthree\nfour", replacementRange: editor.selectedRange())
+            try await Task.sleep(for: .seconds(1))
+            let grown = scrollView.frame.height
+            snapshot(window, "4b-four-lines")
+            check("the composer's height follows typed lines", grown != empty,
+                  "height \(empty) → \(grown)")
+            editor.undoManager?.undo()
+            check("undo removes the typed lines", editor.string.isEmpty, "\"\(editor.string)\"")
+            try await Task.sleep(for: .seconds(1))
+            check("the draft follows the undo", scrollView.frame.height == empty,
+                  "height \(empty) → \(grown) → \(scrollView.frame.height)")
+            editor.undoManager?.redo()
+            try await Task.sleep(for: .seconds(1))
+            check("and the redo", scrollView.frame.height == grown,
+                  "height \(scrollView.frame.height), expected \(grown)")
+            clear(editor)
         }
 
         /// ⌘↩ while listening sends what is visible and leaves nothing running.

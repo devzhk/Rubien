@@ -128,12 +128,28 @@ final class ComposerDictationBridge {
     /// the draft binding, which can lag the editor by an edit.
     var editorText: String? { textView?.string }
 
-    /// Replaces the attached editor's whole text, for a draft written from
-    /// outside the editor. Does nothing when no editor is attached; the next
-    /// editor starts from the draft binding. See
-    /// `ComposerNSTextView.replaceContents(with:)`.
+    /// What the surface's last editor held when it detached, or a replacement
+    /// made since. Nil while an editor is attached.
+    private var detachedEditorText: String?
+
+    /// The surface's editor text, kept while the surface has no editor: the
+    /// attached editor's text, else what the last editor held when it
+    /// detached. Agent Home builds a new editor when its composer docks or
+    /// returns to the start page, in a render whose draft can be out of date,
+    /// so a new editor starts from this rather than from the draft binding
+    /// (see `ComposerTextView.initialText`). Nil for a surface that has not
+    /// had an editor.
+    var retainedEditorText: String? { textView?.string ?? detachedEditorText }
+
+    /// Replaces the surface's editor text, for a draft written from outside
+    /// the editor. With no editor attached the text is kept for the next
+    /// editor to start from. See `ComposerNSTextView.replaceContents(with:)`.
     func replaceEditorText(_ text: String) {
-        textView?.replaceContents(with: text)
+        if let textView {
+            textView.replaceContents(with: text)
+        } else {
+            detachedEditorText = text
+        }
     }
 
     // MARK: Session
@@ -254,12 +270,16 @@ final class ComposerDictationBridge {
         // sessions that now belong to this one.
         self.textView?.dictationBridge = nil
         self.textView = textView
+        // The attached editor is read directly. Dropping the kept text means
+        // an editor that goes away without detaching leaves nothing stale.
+        detachedEditorText = nil
     }
 
     /// Linking and unlinking happen inside SwiftUI view updates.
     func detach(from textView: ComposerNSTextView) {
         guard self.textView === textView else { return }
         interrupt(deferringNotification: true)
+        detachedEditorText = textView.string
         self.textView = nil
     }
 

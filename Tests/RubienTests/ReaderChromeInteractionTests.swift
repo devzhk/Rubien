@@ -30,10 +30,13 @@ final class ReaderChromeInteractionTests: XCTestCase {
     func testAssistantSidebarCanResizeToWideConversationLayout() {
         XCTAssertEqual(AssistantSidebarMetrics.composerHorizontalInset, 12)
         XCTAssertEqual(AssistantSidebarMetrics.widthRange.lowerBound, 420)
+        // The panel opens at its minimum, or wide enough for the dictation
+        // controls where dictation is offered.
         XCTAssertEqual(
-            AssistantSidebarMetrics.widthRange.lowerBound,
-            WebReaderMetrics.defaultChatPanelWidth
+            WebReaderMetrics.defaultChatPanelWidth,
+            DictationEngines.isSupported ? 460 : 420
         )
+        XCTAssertEqual(WebReaderMetrics.defaultChatPanelWidth, AssistantSidebarMetrics.defaultWidth)
         XCTAssertEqual(AssistantSidebarMetrics.widthRange.upperBound, 900)
         XCTAssertEqual(
             FloatingPanelMetrics.width(

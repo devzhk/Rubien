@@ -10,11 +10,18 @@ Revision 2 (2026-11-12). Revised after an independent Codex review
 findings were checked against the code and SDK headers and all are adopted;
 see "Changes from revision 1" at the end.
 
-## Status (2026-11-13)
+## Status (2026-11-14)
 
 Implemented on the branch `assistant-voice-dictation` and fast-forwarded into
-local `main` on 2026-11-13. Not pushed and not released. The status
-subsections under each phase below have the detail; this is the summary.
+local `main` on 2026-11-13, the Command-D shortcut included. Not pushed and
+not released. The status subsections under each phase below have the detail;
+this is the summary.
+
+On the branch and not yet in `main`: the language menu beside the microphone,
+the grouped voice tile with the 460-point default panel width, and the change
+that lets the composer editor own its text (with the rebuilt-editor and undo
+fixes that came out of its review). See the notes "Language switcher", "Voice
+tile and sidebar width", and "Editor owns its text" under Phase 5.
 
 Works, verified by driving the real UI in the preview app with recorded audio
 (`DictationSelfTest`, see "Orchestrator review and end-to-end check of
@@ -841,8 +848,8 @@ second end-to-end round and its review fixes.
   surface through `ComposerDictationBridge.replaceEditorText(_:)`. It ends a
   dictation session (reported on the next main-queue turn), sets the text,
   drops undo history and the cached selection, and does not write the draft.
-  With no editor attached it does nothing. Text equal to the editor's changes
-  nothing.
+  With no editor attached the bridge keeps the text for the next editor. Text
+  equal to the editor's changes nothing.
 - **Writers.** `ChatSurfaceView.resetDraft()` (send, new conversation,
   History in both placements, a scheduled run, a fresh-Home turn committing),
   `completeMention`, and the fresh-Home commit closure in `sendDraft` each
@@ -860,6 +867,36 @@ second end-to-end round and its review fixes.
   editor now changes only from the user, the dictation bridge, and explicit
   replacements, so there is nothing to guess. The timing tests were replaced
   with tests of this contract.
+- **A rebuilt editor.** Agent Home places the composer in two branches (the
+  start page and the docked transcript), so docking and undocking build a new
+  editor while the surface and its bridge stay. The old rule let the next
+  render correct a new editor that started from an out-of-date draft; with
+  renders no longer writing text, nothing would. So a new editor starts from
+  `ComposerDictationBridge.retainedEditorText` (the attached editor's text, or
+  what the last one held when it detached, or a replacement made since) and
+  only a surface's first editor starts from the draft binding
+  (`ComposerTextView.initialText`). Found in review of the change above; not
+  observed on screen.
+- **Undo and the draft.** `NSTextView` undoes and redoes typed text without
+  posting a text-change notification (checked with a plain `NSTextView` too),
+  so the draft kept the text from before the undo: the placeholder, the
+  composer's height, and the Send button's enabled state followed the stale
+  draft until the next keystroke. This predates dictation. The coordinator
+  now observes its own undo manager and publishes the text after an undo or
+  redo when it differs from what the draft has. `DictationSelfTest` checks it
+  in the app by the composer's height, which follows the draft.
+- **Default width test.** `ReaderChromeInteractionTests` still asserted that
+  the panel opens at its 420-point minimum; the voice-tile change made that
+  460 where dictation is offered and the test had been failing since. It now
+  asserts the default for both cases.
+- **Checked (2026-11-14).** App tests: 1222 run, 10 skipped, 0 failures
+  (`--skip ActivityRecordTests`). Live recognizer tests: 4 of 4. In the
+  preview app with recorded audio: the English, failure, and Chinese
+  self-tests pass, and the English one passed ten times in a row at 34 of 34
+  checks, where the old rule had failed once in about twenty. Not exercised
+  on screen: the rebuilt-editor path in Agent Home, because docking needs a
+  sent message and the self-test does not start real agent turns there; it is
+  covered by unit tests of the bridge and of `initialText`.
 
 ### Phase 6 — Language setting, docs, release gate
 

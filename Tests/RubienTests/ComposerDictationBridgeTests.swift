@@ -140,6 +140,7 @@ final class ComposerDictationBridgeTests: XCTestCase {
             coordinator = ComposerTextView.Coordinator(Self.view(of: draft, bridge: bridge))
 
             textView.delegate = coordinator
+            coordinator.textView = textView
             textView.string = text
             textView.setSelectedRange(
                 selection ?? NSRange(location: (text as NSString).length, length: 0))
@@ -166,6 +167,15 @@ final class ComposerDictationBridgeTests: XCTestCase {
                     of: draft, bridge: bridge,
                     shownText: { text }, shownSelection: { selection }),
                 textView: textView)
+        }
+
+        /// The text a new editor would start with if a render showing `text`
+        /// built it for `bridge` (this editor's surface unless given).
+        func newEditorText(
+            inARenderShowing text: String,
+            for bridge: ComposerDictationBridge? = nil
+        ) -> String {
+            Self.view(of: draft, bridge: bridge ?? self.bridge, shownText: { text }).initialText
         }
 
         /// Runs work the editor scheduled on the main queue.
@@ -496,6 +506,116 @@ final class ComposerDictationBridgeTests: XCTestCase {
         editor.textView.dictationBridge = nil
         editor.bridge.replaceEditorText("")
         XCTAssertEqual(editor.string, "xyz")
+    }
+
+    /// The bridge outlives the surface's editors and keeps the text for the
+    /// next one: the attached editor's, then what it held when it detached.
+    func testTheBridgeKeepsTheEditorTextForTheNextEditor() {
+        XCTAssertNil(ComposerDictationBridge().retainedEditorText)
+
+        let editor = Editor("abc")
+        XCTAssertEqual(editor.bridge.retainedEditorText, "abc")
+        editor.type("d")
+        editor.endEvent()
+        XCTAssertEqual(editor.bridge.retainedEditorText, "abcd")
+        editor.undoManager.undo()
+        XCTAssertEqual(editor.bridge.retainedEditorText, "abc")
+        XCTAssertTrue(editor.bridge.begin())
+        editor.bridge.update(transcript: "hello")
+        XCTAssertEqual(editor.bridge.retainedEditorText, "abc hello")
+        editor.bridge.replaceEditorText("")
+        XCTAssertEqual(editor.bridge.retainedEditorText, "")
+
+        // The editor goes away. Its text is kept, and a replacement made with
+        // no editor is what the next one gets.
+        editor.type("x")
+        editor.textView.dictationBridge = nil
+        XCTAssertNil(editor.bridge.editorText)
+        XCTAssertEqual(editor.bridge.retainedEditorText, "x")
+        editor.bridge.replaceEditorText("")
+        XCTAssertEqual(editor.bridge.retainedEditorText, "")
+        XCTAssertEqual(editor.string, "x")
+    }
+
+    /// Agent Home builds a new editor when its composer docks or returns to
+    /// the start page, in a render whose draft can be out of date. The new
+    /// editor starts from the surface's previous editor instead.
+    func testANewEditorStartsFromThePreviousEditorsText() {
+        let editor = Editor("draft")
+        // A surface's first editor has only the draft to start from.
+        XCTAssertEqual(
+            editor.newEditorText(inARenderShowing: "draft", for: ComposerDictationBridge()),
+            "draft")
+
+        editor.type(" more")
+        XCTAssertEqual(editor.newEditorText(inARenderShowing: "draft"), "draft more")
+        // New conversation clears the draft, then the composer is rebuilt.
+        editor.bridge.replaceEditorText("")
+        XCTAssertEqual(editor.newEditorText(inARenderShowing: "draft more"), "")
+        editor.type("next")
+
+        // The same whether the old editor is still attached when the new one
+        // is built or has been taken down first.
+        for detachesFirst in [false, true] {
+            let bridge = editor.bridge
+            if detachesFirst { editor.textView.dictationBridge = nil }
+            let rebuilt = ComposerTextView.makeTextView()
+            rebuilt.string = editor.newEditorText(inARenderShowing: "draft more")
+            rebuilt.dictationBridge = bridge
+            XCTAssertEqual(rebuilt.string, "next", "detached first: \(detachesFirst)")
+            XCTAssertNil(editor.textView.dictationBridge)
+            XCTAssertEqual(bridge.editorText, "next")
+            // Back to the first editor for the second pass.
+            editor.textView.dictationBridge = bridge
+        }
+    }
+
+    // MARK: Undo and the draft
+
+    /// The text view undoes and redoes typed text without announcing a text
+    /// change. The draft follows anyway.
+    func testUndoingTypedTextUpdatesTheDraft() {
+        let editor = Editor("abc")
+        editor.type("d")
+        editor.endEvent()
+        XCTAssertEqual(editor.draft.text, "abcd")
+
+        editor.undoManager.undo()
+        XCTAssertEqual(editor.string, "abc")
+        XCTAssertEqual(editor.draft.text, "abc")
+        XCTAssertEqual(editor.draft.selection, 3..<3)
+        editor.undoManager.redo()
+        XCTAssertEqual(editor.string, "abcd")
+        XCTAssertEqual(editor.draft.text, "abcd")
+    }
+
+    /// Dictation's own undo step announces its change, so undoing it writes
+    /// the draft once.
+    func testUndoingDictationWritesTheDraftOnce() {
+        let editor = Editor("abc")
+        XCTAssertTrue(editor.bridge.begin())
+        editor.bridge.update(transcript: "hello")
+        editor.endEvent()
+        editor.bridge.end()
+        let edits = editor.draft.edits.count
+
+        editor.undoManager.undo()
+        XCTAssertEqual(editor.draft.text, "abc")
+        XCTAssertEqual(editor.draft.edits.count, edits + 1)
+        editor.undoManager.redo()
+        XCTAssertEqual(editor.draft.text, "abc hello")
+        XCTAssertEqual(editor.draft.edits.count, edits + 2)
+    }
+
+    /// After a replacement the caller has written the draft, and typing the
+    /// replaced text again is still published.
+    func testTypingAfterAReplacementIsPublished() {
+        let editor = Editor()
+        editor.type("abc")
+        editor.bridge.replaceEditorText("")
+        editor.draft.text = ""
+        editor.type("abc")
+        XCTAssertEqual(editor.draft.text, "abc")
     }
 
     /// A selection the surface sets lands in the editor's text, also when the
