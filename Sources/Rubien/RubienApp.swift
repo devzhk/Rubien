@@ -178,6 +178,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             UNUserNotificationCenter.current().delegate = self
         }
 
+        #if DEBUG
+        DictationSelfTest.runIfRequested()
+        #endif
+
         // Belt-and-suspenders for the cross-process observation bridge: if a
         // CLI write happened while the app was in the background and the
         // Darwin notification didn't reach us (e.g. the broadcaster wasn't

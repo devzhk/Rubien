@@ -39,6 +39,13 @@ struct ComposerDictationButton: View {
         .help(label)
         .accessibilityLabel(label)
         .accessibilityIdentifier("composer-dictation-button")
+        #if DEBUG
+        // Lets the self-test click the button where it really is on screen. A
+        // GeometryReader would miss moves that leave the size unchanged.
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+            DictationSelfTest.buttonFrames[ObjectIdentifier(bridge)] = frame
+        }
+        #endif
         .popover(isPresented: failurePresented, arrowEdge: .top) {
             if let shownFailure { failurePopover(shownFailure) }
         }
