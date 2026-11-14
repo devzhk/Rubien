@@ -96,8 +96,13 @@ final class MicrophoneCapture: DictationAudioSource {
         }
         configurationObserver = nil
         if let engine {
-            if isTapInstalled { engine.inputNode.removeTap(onBus: 0) }
-            engine.stop()
+            let hadTap = isTapInstalled
+            // The input node of an engine whose device just went away can raise
+            // here as well.
+            _ = ExceptionCatcher.catchException {
+                if hadTap { engine.inputNode.removeTap(onBus: 0) }
+                engine.stop()
+            }
         }
         isTapInstalled = false
         engine = nil
