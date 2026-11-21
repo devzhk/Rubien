@@ -62,42 +62,91 @@ final class PDFExtractorTests: XCTestCase {
         return url
     }
 
-    /// Open `url`, attach an outline built from `entries`, and write to a sibling
-    /// `outlined-...pdf`. Returns the new URL.
+    /// Attach an outline built from `entries` to the PDF at `url`. Returns the
+    /// URL of the outlined copy.
     private func attachOutline(
         to url: URL,
         entries: [(title: String, level: Int, page: Int)]
     ) throws -> URL {
-        guard let doc = PDFDocument(url: url) else {
+        try writeOutlinedCopy(of: url) { doc in
+            let root = PDFOutline()
+            // Track most-recent outline at each level so we can chain children.
+            var lastByLevel: [Int: PDFOutline] = [0: root]
+            for entry in entries {
+                let item = PDFOutline()
+                item.label = entry.title
+                if let page = doc.page(at: entry.page - 1) {
+                    let h = page.bounds(for: .mediaBox).height
+                    item.destination = PDFDestination(page: page, at: NSPoint(x: 0, y: h))
+                }
+                let parent = lastByLevel[entry.level - 1] ?? root
+                parent.insertChild(item, at: parent.numberOfChildren)
+                lastByLevel[entry.level] = item
+                // Drop deeper-level memos (a level-1 entry resets level-2+ chains).
+                for k in lastByLevel.keys where k > entry.level {
+                    lastByLevel.removeValue(forKey: k)
+                }
+            }
+            return root
+        }
+    }
+
+    /// Write a copy of the PDF at `url` with the outline `build` returns, and
+    /// check that the written file reads back with that outline.
+    ///
+    /// The pages move into a new, empty `PDFDocument` before the outline is
+    /// attached. On macOS 27, `PDFDocument.write(to:)` on a document opened
+    /// from existing PDF data ignores changes to `outlineRoot` and writes the
+    /// source file's original outline instead (none, for `makePDF` output). A
+    /// document created empty writes `outlineRoot` as set on every macOS
+    /// version; `scripts/generate-pdf-fixtures.swift` builds its fixtures the
+    /// same way. `build` receives the new document so destinations point at
+    /// its pages.
+    private func writeOutlinedCopy(
+        of url: URL,
+        build: (PDFDocument) -> PDFOutline
+    ) throws -> URL {
+        guard let source = PDFDocument(url: url) else {
             XCTFail("Could not open generated PDF")
             throw NSError(domain: "test", code: 3)
         }
-        let root = PDFOutline()
-        // Track most-recent outline at each level so we can chain children.
-        var lastByLevel: [Int: PDFOutline] = [0: root]
-        for entry in entries {
-            let item = PDFOutline()
-            item.label = entry.title
-            if let page = doc.page(at: entry.page - 1) {
-                let h = page.bounds(for: .mediaBox).height
-                item.destination = PDFDestination(page: page, at: NSPoint(x: 0, y: h))
+        let doc = PDFDocument()
+        for i in 0..<source.pageCount {
+            guard let page = source.page(at: i) else {
+                XCTFail("Could not read page \(i) of generated PDF")
+                throw NSError(domain: "test", code: 3)
             }
-            let parent = lastByLevel[entry.level - 1] ?? root
-            parent.insertChild(item, at: parent.numberOfChildren)
-            lastByLevel[entry.level] = item
-            // Drop deeper-level memos (a level-1 entry resets level-2+ chains).
-            for k in lastByLevel.keys where k > entry.level {
-                lastByLevel.removeValue(forKey: k)
-            }
+            doc.insert(page, at: i)
         }
+        let root = build(doc)
         doc.outlineRoot = root
+        let expected = Self.outlineSignature(root, in: doc)
 
         let outlinedURL = tmpDir.appendingPathComponent("outlined-\(UUID().uuidString).pdf")
         guard doc.write(to: outlinedURL) else {
             XCTFail("Failed to write outlined PDF")
             throw NSError(domain: "test", code: 4)
         }
+
+        // Report a writer that drops or replaces the outline as a fixture
+        // failure, rather than as a missing-sections assertion further on.
+        let written = PDFDocument(url: outlinedURL)
+        let actual = written.flatMap { w in w.outlineRoot.map { Self.outlineSignature($0, in: w) } } ?? []
+        guard actual == expected else {
+            XCTFail("Fixture outline did not survive PDFDocument.write: expected \(expected), read back \(actual)")
+            throw NSError(domain: "test", code: 5)
+        }
         return outlinedURL
+    }
+
+    /// Depth-first `label@page` entries (0-based page, `-` when there is no
+    /// destination), indented by depth, for comparing two outline trees.
+    private static func outlineSignature(_ node: PDFOutline, in doc: PDFDocument, depth: Int = 0) -> [String] {
+        (0..<node.numberOfChildren).compactMap { node.child(at: $0) }.flatMap { child -> [String] in
+            let page = child.destination?.page.map { String(doc.index(for: $0)) } ?? "-"
+            let entry = String(repeating: "  ", count: depth) + "\(child.label ?? "")@\(page)"
+            return [entry] + outlineSignature(child, in: doc, depth: depth + 1)
+        }
     }
 
     // MARK: - info
@@ -404,21 +453,20 @@ final class PDFExtractorTests: XCTestCase {
         // destinations is genuinely useless — we drop it rather than emit a
         // section pointing nowhere.
         let url = try makePDF(pages: ["a", "b"])
-        guard let doc = PDFDocument(url: url) else { XCTFail(); return }
-        let root = PDFOutline()
-        let orphan = PDFOutline()
-        orphan.label = "Orphan With No Destination And No Children"
-        root.insertChild(orphan, at: 0)
-        // Plus a real entry alongside, so the document still has *some* outline.
-        let real = PDFOutline()
-        real.label = "Real Entry"
-        if let p = doc.page(at: 0) {
-            real.destination = PDFDestination(page: p, at: NSPoint(x: 0, y: 100))
+        let outURL = try writeOutlinedCopy(of: url) { doc in
+            let root = PDFOutline()
+            let orphan = PDFOutline()
+            orphan.label = "Orphan With No Destination And No Children"
+            root.insertChild(orphan, at: 0)
+            // Plus a real entry alongside, so the document still has *some* outline.
+            let real = PDFOutline()
+            real.label = "Real Entry"
+            if let p = doc.page(at: 0) {
+                real.destination = PDFDestination(page: p, at: NSPoint(x: 0, y: 100))
+            }
+            root.insertChild(real, at: 1)
+            return root
         }
-        root.insertChild(real, at: 1)
-        doc.outlineRoot = root
-        let outURL = tmpDir.appendingPathComponent("orphan-\(UUID().uuidString).pdf")
-        XCTAssertTrue(doc.write(to: outURL))
 
         let info = try PDFExtractor.info(at: outURL)
         let sections = try XCTUnwrap(info.sections)
@@ -434,41 +482,35 @@ final class PDFExtractorTests: XCTestCase {
     /// - Chapter 3 (p4)
     private func makeContainerOutlinePDF() throws -> URL {
         let url = try makePDF(pages: ["p1", "p2", "p3", "p4"])
-        guard let doc = PDFDocument(url: url) else {
-            XCTFail("Could not open PDF")
-            throw NSError(domain: "test", code: 9)
-        }
-        let root = PDFOutline()
-        let volume = PDFOutline()
-        volume.label = "Volume 1 (container)"
-        // Intentionally leave volume.destination = nil
-        root.insertChild(volume, at: 0)
+        return try writeOutlinedCopy(of: url) { doc in
+            let root = PDFOutline()
+            let volume = PDFOutline()
+            volume.label = "Volume 1 (container)"
+            // Intentionally leave volume.destination = nil
+            root.insertChild(volume, at: 0)
 
-        let ch1 = PDFOutline()
-        ch1.label = "Chapter 1"
-        if let p2 = doc.page(at: 1) {
-            ch1.destination = PDFDestination(page: p2, at: NSPoint(x: 0, y: 700))
-        }
-        volume.insertChild(ch1, at: 0)
+            let ch1 = PDFOutline()
+            ch1.label = "Chapter 1"
+            if let p2 = doc.page(at: 1) {
+                ch1.destination = PDFDestination(page: p2, at: NSPoint(x: 0, y: 700))
+            }
+            volume.insertChild(ch1, at: 0)
 
-        let ch2 = PDFOutline()
-        ch2.label = "Chapter 2"
-        if let p3 = doc.page(at: 2) {
-            ch2.destination = PDFDestination(page: p3, at: NSPoint(x: 0, y: 700))
-        }
-        volume.insertChild(ch2, at: 1)
+            let ch2 = PDFOutline()
+            ch2.label = "Chapter 2"
+            if let p3 = doc.page(at: 2) {
+                ch2.destination = PDFDestination(page: p3, at: NSPoint(x: 0, y: 700))
+            }
+            volume.insertChild(ch2, at: 1)
 
-        let ch3 = PDFOutline()
-        ch3.label = "Chapter 3"
-        if let p4 = doc.page(at: 3) {
-            ch3.destination = PDFDestination(page: p4, at: NSPoint(x: 0, y: 700))
+            let ch3 = PDFOutline()
+            ch3.label = "Chapter 3"
+            if let p4 = doc.page(at: 3) {
+                ch3.destination = PDFDestination(page: p4, at: NSPoint(x: 0, y: 700))
+            }
+            root.insertChild(ch3, at: 1)
+            return root
         }
-        root.insertChild(ch3, at: 1)
-
-        doc.outlineRoot = root
-        let outURL = tmpDir.appendingPathComponent("container-\(UUID().uuidString).pdf")
-        XCTAssertTrue(doc.write(to: outURL))
-        return outURL
     }
 
     func testSectionPathDeepestWins() throws {
