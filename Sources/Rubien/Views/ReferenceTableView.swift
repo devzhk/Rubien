@@ -1109,7 +1109,7 @@ private struct ReferenceTableContent: View {
     }
 }
 
-private struct ReferenceTableSelectionScroller: NSViewRepresentable {
+struct ReferenceTableSelectionScroller: NSViewRepresentable {
     let selectedId: Int64?
     let scrollRequest: Int
     let rowIDs: [Int64?]
@@ -1145,6 +1145,7 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
         var usesAutomaticRowHeights = false
         private var lastScrollKey: ScrollKey?
         private var scrollGeneration = 0
+        private var follower: RevealFollower?
         private weak var configuredTableView: NSTableView?
         private var configuredAutomaticRowHeights: Bool?
         private var configurationGeneration = 0
@@ -1212,6 +1213,7 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
             guard let selectedId else {
                 scrollGeneration &+= 1
                 lastScrollKey = nil
+                follower = nil
                 return
             }
 
@@ -1222,6 +1224,7 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
             // succession. Invalidate callbacks for older snapshots so their
             // AppKit scroll corrections cannot land during a newer Table diff.
             scrollGeneration &+= 1
+            follower = nil
             let generation = scrollGeneration
             DispatchQueue.main.async { [weak view, weak self] in
                 guard let view else { return }
@@ -1251,17 +1254,113 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
                 retry(from: view, key: key, generation: generation, attempt: attempt)
                 return
             }
-            guard selectedRow < tableView.numberOfRows,
-                  tableView.selectedRowIndexes.contains(selectedRow) else {
+            // Wait until AppKit has applied this snapshot's rows. An AppKit
+            // selection (from a click) moves with its item, so when there is
+            // one it also confirms the row behind a same-count reorder. A
+            // programmatic SwiftUI selection, such as a search reveal, leaves
+            // AppKit's selection empty for an off-screen row, so the row count
+            // is the only signal; waiting for the selection there never ends.
+            let appKitSelection = tableView.selectedRowIndexes
+            guard tableView.numberOfRows == key.rowIDs.count,
+                  appKitSelection.isEmpty || appKitSelection.contains(selectedRow) else {
                 retry(from: view, key: key, generation: generation, attempt: attempt)
                 return
             }
 
-            reveal(row: selectedRow, in: tableView)
+            let hadToScroll = !Self.isRowFullyVisible(selectedRow, in: tableView)
+            Self.reveal(row: selectedRow, in: tableView)
             lastScrollKey = key
+            // Following a row that was already in view (a click) would only
+            // fight the user's own scrolling.
+            if hadToScroll {
+                follower = RevealFollower(row: selectedRow, tableView: tableView)
+            }
         }
 
-        private func reveal(row: Int, in tableView: NSTableView) {
+        /// Keeps a just-revealed row in view while the table settles. A newly
+        /// shown table may still animate its frame, and automatic row heights
+        /// replace estimates as rows are realized; AppKit then re-clamps the
+        /// clip view, which can push the row back out. The follower re-reveals
+        /// after table frame changes for a short window and lets go as soon as
+        /// the user scrolls. Releasing it removes its observers.
+        private final class RevealFollower {
+            private static let duration: TimeInterval = 1.0
+
+            private let row: Int
+            private weak var tableView: NSTableView?
+            private var observers: [NSObjectProtocol] = []
+            private var checkPending = false
+
+            init?(row: Int, tableView: NSTableView) {
+                guard let scrollView = tableView.enclosingScrollView else { return nil }
+                self.row = row
+                self.tableView = tableView
+                let center = NotificationCenter.default
+                observers = [
+                    center.addObserver(
+                        forName: NSView.frameDidChangeNotification, object: tableView, queue: .main
+                    ) { [weak self] _ in
+                        self?.scheduleCheck()
+                    },
+                    // Posted for user scrolls, including legacy mouse wheels
+                    // that never post `willStartLiveScrollNotification`, and
+                    // never for the programmatic scroll in `reveal`.
+                    center.addObserver(
+                        forName: NSScrollView.didLiveScrollNotification, object: scrollView, queue: .main
+                    ) { [weak self] _ in
+                        self?.stop()
+                    },
+                ]
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.duration) { [weak self] in
+                    self?.stop()
+                }
+            }
+
+            deinit { stop() }
+
+            private func stop() {
+                observers.forEach(NotificationCenter.default.removeObserver)
+                observers = []
+            }
+
+            private func scheduleCheck() {
+                guard !checkPending else { return }
+                checkPending = true
+                // Check after the layout pass that changed the frame finishes.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.observers.isEmpty else { return }
+                    self.checkPending = false
+                    guard let tableView = self.tableView,
+                          self.row < tableView.numberOfRows,
+                          !Coordinator.isRowFullyVisible(self.row, in: tableView)
+                    else { return }
+                    Coordinator.reveal(row: self.row, in: tableView)
+                }
+            }
+        }
+
+        private static func isRowFullyVisible(_ row: Int, in tableView: NSTableView) -> Bool {
+            guard let clipView = tableView.enclosingScrollView?.contentView else { return false }
+            return isRow(
+                tableView.rect(ofRow: row),
+                fullyVisibleIn: clipView.bounds,
+                contentInsets: clipView.contentInsets
+            )
+        }
+
+        /// Vertical only: the table can be wider than its clip view, and the
+        /// top content inset lies under the column header.
+        static func isRow(
+            _ rowRect: NSRect,
+            fullyVisibleIn clipBounds: NSRect,
+            contentInsets: NSEdgeInsets
+        ) -> Bool {
+            !rowRect.isEmpty
+                && rowRect.minY >= clipBounds.minY + contentInsets.top
+                && rowRect.maxY <= clipBounds.maxY - contentInsets.bottom
+        }
+
+        private static func reveal(row: Int, in tableView: NSTableView) {
             // SwiftUI owns Table selection through its Binding. Calling
             // `selectRowIndexes` (and forcing layout) here re-entered the
             // backing NSTableView delegate during rapid row diffs. This bridge
