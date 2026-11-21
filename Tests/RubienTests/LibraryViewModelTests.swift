@@ -16,7 +16,6 @@ final class LibraryViewModelTests: XCTestCase {
     func testViewModelInitialState() throws {
         let db = try makeTestDB()
         let vm = LibraryViewModel(db: db)
-        XCTAssertEqual(vm.searchText, "")
         XCTAssertFalse(vm.isImporting)
         XCTAssertNil(vm.importProgress)
         XCTAssertNil(vm.errorMessage)

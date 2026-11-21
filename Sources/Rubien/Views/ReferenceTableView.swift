@@ -33,6 +33,26 @@ private let hardcodedReferenceTableDefaultFieldKeys: Set<String> = [
     "tags", "readingStatus", "lastReadAt", "readCount",
 ]
 
+extension PipelineContext {
+    /// The context the reference table filters, sorts, and groups with. ⌘F's
+    /// "This view" search builds the same one, so its results are exactly the
+    /// rows the table would show.
+    static func library(
+        db: AppDatabase,
+        tagMap: [Int64: [Tag]],
+        propertyValueMap: [Int64: [Int64: String]],
+        propertyDefs: [PropertyDefinition]
+    ) -> PipelineContext {
+        PipelineContext(
+            tagMap: tagMap,
+            propertyValueMap: propertyValueMap,
+            propertyDefs: propertyDefs,
+            pdfAttachedRefIds: (try? db.pdfAttachedReferenceIDs()) ?? [],
+            now: Date()
+        )
+    }
+}
+
 func referenceTableCustomProperties(_ definitions: [PropertyDefinition]) -> [PropertyDefinition] {
     definitions.filter { property in
         guard property.isVisible else { return false }
@@ -436,13 +456,11 @@ struct ReferenceTableView: View {
     }
 
     private var pipelineContext: PipelineContext {
-        let pdfAttachedIds = (try? db.pdfAttachedReferenceIDs()) ?? []
-        return PipelineContext(
+        .library(
+            db: db,
             tagMap: tagMap,
             propertyValueMap: customPropertyValueMap,
-            propertyDefs: propertyDefs,
-            pdfAttachedRefIds: pdfAttachedIds,
-            now: Date()
+            propertyDefs: propertyDefs
         )
     }
 

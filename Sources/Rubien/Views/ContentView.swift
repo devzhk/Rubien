@@ -14,50 +14,6 @@ enum SidebarItem: Hashable {
     case view(Int64)
 }
 
-struct SearchQuery {
-    var keyword: String = ""
-    var author: String = ""
-    var yearFrom: Int?
-    var yearTo: Int?
-    var journal: String = ""
-    var type: ReferenceType?
-
-    static func parse(_ text: String) -> SearchQuery {
-        var q = SearchQuery()
-        var keywords: [String] = []
-        for part in text.components(separatedBy: " ") {
-            if part.hasPrefix("author:") {
-                q.author = String(part.dropFirst("author:".count))
-            } else if part.hasPrefix("year:") {
-                let val = String(part.dropFirst("year:".count))
-                if val.contains("-") {
-                    let comps = val.split(separator: "-", maxSplits: 1)
-                    if val.hasPrefix("-") {
-                        q.yearTo = Int(comps.last ?? "")
-                    } else if comps.count == 2 {
-                        q.yearFrom = Int(comps[0])
-                        q.yearTo = Int(comps[1])
-                    } else {
-                        q.yearFrom = Int(comps[0])
-                    }
-                } else {
-                    q.yearFrom = Int(val)
-                    q.yearTo = q.yearFrom
-                }
-            } else if part.hasPrefix("journal:") {
-                q.journal = String(part.dropFirst("journal:".count))
-            } else if part.hasPrefix("type:") {
-                let val = String(part.dropFirst("type:".count))
-                q.type = ReferenceType.allCases.first { $0.rawValue == val }
-            } else if !part.isEmpty {
-                keywords.append(part)
-            }
-        }
-        q.keyword = keywords.joined(separator: " ")
-        return q
-    }
-}
-
 /// Side-effect-free result of reading and parsing Markdown sources.
 struct MarkdownImportPreparationResult: Sendable {
     let entries: [PreparedReferenceImport]
@@ -268,10 +224,6 @@ final class LibraryViewModel: ObservableObject {
     func stashCurrentViewDraft() {
         stashDraftIfDirty(for: selectedSidebar)
     }
-    /// Raw search text typed by the user; debounced before hitting the DB.
-    @Published var searchText = "" {
-        didSet { scheduleSearchDebounce() }
-    }
     @Published var isImporting = false
     @Published var importProgress: String?
     /// Transient confirmation for single-reference adds — kept SEPARATE from
@@ -310,10 +262,6 @@ final class LibraryViewModel: ObservableObject {
     private var referenceObserverCancellable: AnyCancellable?
     /// Scope captured when the active reference observation was created.
     private var observedReferenceScope: ReferenceScope?
-    /// Timer-based debounce task for search input.
-    private var searchDebounceTask: Task<Void, Never>?
-    /// The filter currently applied to the database query.
-    private var activeFilter = ReferenceFilter()
     /// Wired up by `ContentView` from its `@EnvironmentObject` so import
     /// flows can kick the PDF upload-queue drainer immediately. Weak to
     /// avoid retain cycles — the coordinator outlives the view model.
@@ -416,13 +364,13 @@ final class LibraryViewModel: ObservableObject {
     }
 
     /// (Re-)subscribe to the database with the current scope + filter.
-    /// Called whenever the sidebar selection or the debounced filter changes.
+    /// Called whenever the sidebar selection changes.
     private func rebuildReferenceObserver() {
         referenceObserverCancellable?.cancel()
 
         let scope = currentReferenceScope
         observedReferenceScope = scope
-        var filter = activeFilter
+        var filter = ReferenceFilter()
 
         if case .titleKeyword(let word) = selectedSidebar {
             filter.keyword = word
@@ -481,30 +429,6 @@ final class LibraryViewModel: ObservableObject {
             return false
         }
     }
-
-
-    /// Debounce raw search text by 250 ms before rebuilding the DB observer.
-    private func scheduleSearchDebounce() {
-        searchDebounceTask?.cancel()
-        searchDebounceTask = Task { [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(nanoseconds: 250_000_000) // 250 ms
-            guard !Task.isCancelled else { return }
-            let parsed = SearchQuery.parse(self.searchText)
-            var filter = ReferenceFilter()
-            filter.keyword      = parsed.keyword
-            filter.author       = parsed.author
-            filter.yearFrom     = parsed.yearFrom
-            filter.yearTo       = parsed.yearTo
-            filter.journal      = parsed.journal
-            filter.referenceType = parsed.type
-            self.activeFilter = filter
-            self.rebuildReferenceObserver()
-        }
-    }
-
-    /// Convenience accessor — references are already filtered by the DB query.
-    var filteredReferences: [Reference] { references }
 
     /// Top title keywords extracted from all reference titles.
     var titleKeywords: [(word: String, count: Int)] {
@@ -931,6 +855,39 @@ final class LibraryViewModel: ObservableObject {
 
     var currentViewName: String? { currentDBView?.name }
 
+    /// What ⌘F's "This view" searches: the selected list's database scope plus
+    /// the filters on screen, including an unsaved draft. `nil` for a list that
+    /// isn't a scope-and-filters list.
+    var currentSearchViewScope: LibrarySearchViewScope? {
+        let name: String
+        let icon: String
+        switch selectedSidebar {
+        case .titleKeyword:
+            return nil
+        case .allReferences:
+            // Only offered with ad-hoc filters, so don't reuse the Library icon.
+            name = String(localized: "sidebar.item.all", bundle: .module)
+            icon = "line.3.horizontal.decrease.circle"
+        case .tag(let id):
+            guard let tag = tags.first(where: { $0.id == id }) else { return nil }
+            name = tag.name
+            icon = "tag"
+        case .view:
+            guard let dbView = currentDBView else { return nil }
+            name = dbView.name
+            icon = dbView.icon
+        }
+        return LibrarySearchViewScope(
+            name: name,
+            icon: icon,
+            referenceScope: currentReferenceScope,
+            filters: viewFilters,
+            tagMap: referenceTagMap,
+            propertyValueMap: customPropertyValueMap,
+            propertyDefs: propertyDefs
+        )
+    }
+
     func saveDraftForCurrentView() {
         guard var dbView = currentDBView, let id = dbView.id else { return }
         dbView.parsedFilters = viewFilters
@@ -1072,7 +1029,7 @@ struct ContentView: View {
 
     private var selectedReference: Reference? {
         guard let selectedId else { return nil }
-        return viewModel.filteredReferences.first { $0.id == selectedId }
+        return viewModel.references.first { $0.id == selectedId }
     }
 
     private func beginReferenceExport(_ intent: ReferenceExportIntent) {
@@ -1292,7 +1249,7 @@ struct ContentView: View {
 
     private var libraryTableSurface: some View {
         ReferenceTableView(
-            references: viewModel.filteredReferences,
+            references: viewModel.references,
             tagMap: viewModel.referenceTagMap,
             allTags: viewModel.tags,
             selectedId: selectedId,
@@ -1579,10 +1536,10 @@ struct ContentView: View {
             if showSearch {
                 SearchOverlay(
                     db: viewModel.db,
-                    scope: mainDestination == .home ? .all : viewModel.currentReferenceScope,
+                    viewScope: searchListScope,
                     isPresented: $showSearch,
-                    onSelect: { ref in
-                        revealReference(ref)
+                    onSelect: { ref, searchedScope in
+                        revealSearchResult(ref, searchedScope: searchedScope)
                     },
                     onDeleteMultiple: { refs in
                         deleteReferences(refs)
@@ -1870,14 +1827,29 @@ struct ContentView: View {
         )
     }
 
-    private func revealReference(_ reference: Reference) {
+    /// Selects a reference and asks the table to scroll to it. Unless the row
+    /// is known to be in the current list, first land on the unfiltered
+    /// .allReferences scope, which always renders it. Never the default saved
+    /// view: its filters could hide the row.
+    private func revealReference(_ reference: Reference, inCurrentList: Bool = false) {
         guard let id = reference.id else { return }
-        // Land on the unfiltered .allReferences scope, which always renders the
-        // row. Never the default saved view — its filters could hide the row.
-        showLibrary(selecting: .allReferences, preemptsInitialDefaultView: true)
+        if !inCurrentList {
+            showLibrary(selecting: .allReferences, preemptsInitialDefaultView: true)
+        }
         selectedId = id
         tableScrollRequest += 1
         columnVisibility = .all
+    }
+
+    /// The library list ⌘F opens over; `nil` from Home.
+    private var searchListScope: LibrarySearchViewScope? {
+        mainDestination == .library ? viewModel.currentSearchViewScope : nil
+    }
+
+    /// Stays in the current list (keeping an unsaved view draft) when the
+    /// result is known to be visible there; otherwise lands on All References.
+    private func revealSearchResult(_ reference: Reference, searchedScope: LibrarySearchScopeChoice) {
+        revealReference(reference, inCurrentList: searchedScope.revealsInPlace(over: searchListScope))
     }
 
     private func openBrowserImport(_ destination: BrowserClipDeepLinkDestination) {

@@ -35,6 +35,23 @@ final class ReferenceSearchScopeTests: XCTestCase {
         XCTAssertEqual(try search(db, "scaling", nil), [paper.id!, note.id!], "Legacy clients retain FTS-only search")
     }
 
+    func testLightColumnsSkipSavedWebTextButKeepRelevanceOrder() throws {
+        let db = try database()
+        var clip = Reference(title: "Scaling", webContent: "Long saved article about scaling")
+        var paper = Reference(title: "Scaling scaling laws")
+        try db.saveReference(&clip)
+        try db.saveReference(&paper)
+        var filter = ReferenceFilter()
+        filter.keyword = "scaling"
+        filter.contentScope = .everything
+        let full = try db.fetchReferences(scope: .all, filter: filter, orderBy: .relevance)
+        let light = try db.fetchReferences(scope: .all, filter: filter, orderBy: .relevance, lightColumns: true)
+        XCTAssertEqual(light.map(\.id), full.map(\.id))
+        XCTAssertEqual(light.map(\.title), full.map(\.title))
+        XCTAssertNotNil(full.first { $0.id == clip.id }?.webContent)
+        XCTAssertNil(light.first { $0.id == clip.id }?.webContent)
+    }
+
     func testEverythingCanMatchTermsAcrossMetadataAndAnnotationsWithoutDuplicates() throws {
         let db = try database()
         var paper = Reference(title: "Scaling")

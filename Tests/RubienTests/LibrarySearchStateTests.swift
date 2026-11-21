@@ -15,6 +15,7 @@ final class LibrarySearchStateTests: XCTestCase {
         for mutate: (inout LibrarySearchFilterState) -> Void in [
             { $0.query = "compute" }, { $0.contentScope = .notesAndHighlights },
             { $0.hasPDF = true }, { $0.titleOnly = true }, { $0.selectedType = .webpage },
+            { $0.searchScope = .thisView },
         ] {
             var next = changed
             mutate(&next)

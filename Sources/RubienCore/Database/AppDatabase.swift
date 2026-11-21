@@ -4387,14 +4387,21 @@ extension AppDatabase {
         case relevance
     }
 
+    /// - Parameter lightColumns: Skip the heavy columns list rows never show
+    ///   (saved web text), as the live library feed does.
     public func fetchReferences(
         scope: ReferenceScope,
         filter: ReferenceFilter,
         limit: Int = 0,
-        orderBy: ReferenceOrdering = .dateAddedDescending
+        orderBy: ReferenceOrdering = .dateAddedDescending,
+        lightColumns: Bool = false
     ) throws -> [Reference] {
         try dbWriter.read { db in
-            try fetchReferences(db: db, scope: scope, filter: filter, limit: limit, orderBy: orderBy)
+            try fetchReferences(
+                db: db, scope: scope, filter: filter, limit: limit,
+                selectedColumns: lightColumns ? Reference.lightColumns : nil,
+                orderBy: orderBy
+            )
         }
     }
 
@@ -5207,7 +5214,7 @@ extension AppDatabase {
 
 /// Describes the active sidebar filter so the database layer can build
 /// the correct query without loading every row into memory first.
-public enum ReferenceScope: Sendable {
+public enum ReferenceScope: Equatable, Sendable {
     case all
     case tag(Int64)
 }

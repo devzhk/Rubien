@@ -10,21 +10,30 @@ struct LibrarySearchFilterState: Equatable {
     var titleOnly: Bool
     var yearFrom: String
     var yearTo: String
+    var searchScope: LibrarySearchScopeChoice = .library
 
     func preservesSelection(from old: Self) -> Bool {
         query == old.query && contentScope == old.contentScope &&
-        selectedType == old.selectedType && hasPDF == old.hasPDF && titleOnly == old.titleOnly
+        selectedType == old.selectedType && hasPDF == old.hasPDF && titleOnly == old.titleOnly &&
+        searchScope == old.searchScope
     }
 }
 
 struct SearchOverlay: View {
     let db: AppDatabase
-    let scope: ReferenceScope
+    /// The library list ⌘F was opened over; `nil` from Home. The overlay offers
+    /// "This view" only when the list hides part of the library.
+    let viewScope: LibrarySearchViewScope?
     @Binding var isPresented: Bool
-    let onSelect: (Reference) -> Void
+    /// Receives the scope the result was found in, so the caller can keep
+    /// "This view" results in the view.
+    let onSelect: (Reference, LibrarySearchScopeChoice) -> Void
     var onDeleteMultiple: (([Reference]) -> Void)? = nil
 
     @State private var query = ""
+    /// Starts on "This view" each time ⌘F opens; ignored unless the list hides
+    /// part of the library.
+    @State private var scopeChoice: LibrarySearchScopeChoice = .thisView
     @FocusState private var isFocused: Bool
     @State private var selectedIndex: Int?
 
@@ -65,7 +74,21 @@ struct SearchOverlay: View {
     }
 
     private var filterState: LibrarySearchFilterState {
-        LibrarySearchFilterState(query: query, contentScope: contentScope, selectedType: selectedType, hasPDF: hasPDF, titleOnly: titleOnly, yearFrom: yearFrom, yearTo: yearTo)
+        LibrarySearchFilterState(query: query, contentScope: contentScope, selectedType: selectedType, hasPDF: hasPDF, titleOnly: titleOnly, yearFrom: yearFrom, yearTo: yearTo, searchScope: searchedScope)
+    }
+
+    /// The list's scope when searching it differs from searching the library.
+    private var narrowingViewScope: LibrarySearchViewScope? {
+        viewScope?.hidesReferences == true ? viewScope : nil
+    }
+
+    /// The view scope the current search runs in, or `nil` for the library.
+    private var activeViewScope: LibrarySearchViewScope? {
+        scopeChoice == .thisView ? narrowingViewScope : nil
+    }
+
+    private var searchedScope: LibrarySearchScopeChoice {
+        activeViewScope == nil ? .library : .thisView
     }
 
     var body: some View {
@@ -132,12 +155,17 @@ struct SearchOverlay: View {
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
                 .padding(.bottom, 10)
-                Text(scopeDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 10)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(scopeDescription)
+                    if let activeViewScope {
+                        Text(String(format: String(localized: "Only references shown in “%@”.", bundle: .module), activeViewScope.name))
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
 
                 // Filter bar
                 Divider()
@@ -287,6 +315,11 @@ struct SearchOverlay: View {
             }
             return .handled
         }
+        .onChange(of: viewScope) { _, _ in
+            // A sync can change the list's filters or lookup maps while the
+            // overlay is open; keep "This view" results in step with the table.
+            if activeViewScope != nil { scheduleSearch() }
+        }
         .onChange(of: filterState) { old, new in
             selectedIndex = 0
             if !new.preservesSelection(from: old) { clearMultiSelection() }
@@ -403,7 +436,11 @@ struct SearchOverlay: View {
 
     private var searchPlaceholder: String {
         switch contentScope {
-        case .everything: return String(localized: "Search your library…", bundle: .module)
+        case .everything:
+            if let activeViewScope {
+                return String(format: String(localized: "Search in %@…", bundle: .module), activeViewScope.name)
+            }
+            return String(localized: "Search your library…", bundle: .module)
         case .papers: return String(localized: "Search titles, authors, abstracts…", bundle: .module)
         case .notesAndHighlights: return String(localized: "Search notes and highlighted text…", bundle: .module)
         }
@@ -421,6 +458,11 @@ struct SearchOverlay: View {
 
     private var filterBar: some View {
         HStack(spacing: 6) {
+            if let narrowingViewScope {
+                scopePills(narrowingViewScope)
+                Divider().frame(height: 16)
+            }
+
             if contentScope != .notesAndHighlights {
                 FilterPill(
                     icon: "character.cursor.ibeam",
@@ -478,6 +520,31 @@ struct SearchOverlay: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+
+    /// "This view" vs "Library", shown only when ⌘F opened over a list that
+    /// hides part of the library.
+    @ViewBuilder
+    private func scopePills(_ viewScope: LibrarySearchViewScope) -> some View {
+        FilterPill(
+            icon: viewScope.icon,
+            label: viewScope.name,
+            isActive: scopeChoice == .thisView
+        ) {
+            scopeChoice = .thisView
+        }
+        .help(String(format: String(localized: "Search only references shown in “%@”", bundle: .module), viewScope.name))
+        .accessibilityAddTraits(scopeChoice == .thisView ? .isSelected : [])
+
+        FilterPill(
+            icon: "books.vertical",
+            label: String(localized: "Library", bundle: .module),
+            isActive: scopeChoice == .library
+        ) {
+            scopeChoice = .library
+        }
+        .help(String(localized: "Search the whole library", bundle: .module))
+        .accessibilityAddTraits(scopeChoice == .library ? .isSelected : [])
     }
 
     // MARK: - Expanded filters
@@ -553,12 +620,12 @@ struct SearchOverlay: View {
         let limit = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasActiveFilters ? 20 : 0
         let filter = buildFilter()
         let db = self.db
-        let scope = self.scope
+        let viewScope = activeViewScope
 
         do {
             let worker = Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
-                let refs = try db.fetchReferences(scope: scope, filter: filter, limit: limit, orderBy: .relevance)
+                let refs = try librarySearchReferences(db: db, viewScope: viewScope, filter: filter, limit: limit)
                 try Task.checkCancellation()
                 return refs
             }
@@ -666,7 +733,7 @@ struct SearchOverlay: View {
         // for multi-open, select the first and close overlay
         let selected = results.filter { multiSelection.contains($0.id ?? -1) }
         guard let first = selected.first else { return }
-        onSelect(first)
+        onSelect(first, searchedScope)
         close()
     }
 
@@ -678,7 +745,7 @@ struct SearchOverlay: View {
     }
 
     private func select(_ ref: Reference) {
-        onSelect(ref)
+        onSelect(ref, searchedScope)
         close()
     }
 
@@ -707,6 +774,7 @@ private struct FilterPill: View {
             Image(systemName: icon)
                 .font(.system(size: 10))
             Text(label)
+                .lineLimit(1)
         }
         .font(.system(size: 12))
         .foregroundStyle(isActive ? .primary : .secondary)
