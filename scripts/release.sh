@@ -176,7 +176,7 @@ echo "▸ Computing Sparkle EdDSA signature…"
 # artifact bundle's installed permissions. Earlier the script used the
 # slash form (-perm /111) which is documented portable but does NOT work
 # on macOS Tahoe (BSD find regression — returns empty result silently).
-SIGN_UPDATE="$(find .build -name 'sign_update' -type f -perm -111 2>/dev/null | head -1)"
+SIGN_UPDATE="$(find .build -name 'sign_update' -type f -perm -111 -not -path '*/old_dsa_scripts/*' 2>/dev/null | head -1)"
 if [ -z "$SIGN_UPDATE" ]; then
     echo "✗ sign_update tool not found in .build/. Run swift build first." >&2
     exit 1

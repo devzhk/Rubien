@@ -194,7 +194,7 @@ EXPECTED_LENGTH="$(sed -n 's/.*length="\([0-9][0-9]*\)".*/\1/p' Docs/appcast.xml
 EXPECTED_SIGNATURE="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' Docs/appcast.xml | tail -1)"
 test -n "$EXPECTED_LENGTH" && test -n "$EXPECTED_SIGNATURE"
 test "$(stat -f '%z' "$DMG")" = "$EXPECTED_LENGTH"
-SIGN_UPDATE="$(find .build -name sign_update -type f -perm -111 | head -1)"
+SIGN_UPDATE="$(find .build -name sign_update -type f -perm -111 -not -path '*/old_dsa_scripts/*' | head -1)"
 test -n "$SIGN_UPDATE"
 "$SIGN_UPDATE" --verify "$DMG" "$EXPECTED_SIGNATURE"
 unzip -tq "$EXTENSION"
@@ -220,6 +220,20 @@ else
 fi
 git push origin main
 gh workflow run linux-cli-release.yml --repo devzhk/Rubien -f tag="v${VERSION}"
+```
+
+A successful `release.sh` does not prove the feed is live. The appcast push
+triggers the **Deploy Pages** workflow, which can fail on GitHub's side
+(0.8.9: `actions/deploy-pages` found no `github-pages` artifact). Until it
+succeeds, the live appcast still lists the previous release. Re-running that
+run does not help: its earlier attempt's artifact is still attached, and the
+deploy then fails on duplicate artifacts. Dispatch a fresh run instead, then
+confirm the live feed matches the committed file:
+
+```bash
+gh run list --repo devzhk/Rubien --workflow="Deploy Pages" --limit 1
+gh workflow run pages.yml --repo devzhk/Rubien --ref main   # only if it failed
+curl -s "https://devzhk.github.io/Rubien/appcast.xml?t=$(date +%s)" | cmp - Docs/appcast.xml
 ```
 
 ### Browser-extension release contract
