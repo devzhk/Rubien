@@ -1,7 +1,7 @@
 import { probeCliVersion, type CliProbe } from "./cli.js";
 
-/** Minimum CLI build supporting attachment tools. */
-export const MIN_CLI_BUILD = 50;
+/** Minimum CLI build supporting attachment URL inputs and display names. */
+export const MIN_CLI_BUILD = 60;
 
 export interface CliVersion {
   version: string;

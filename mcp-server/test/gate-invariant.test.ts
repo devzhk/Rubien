@@ -89,7 +89,7 @@ describe("version-gate invariant", () => {
       expect(
         text,
         `${tool.name} must carry the update instruction, got: ${text}`,
-      ).toContain("needs build >= 50");
+      ).toContain("needs build >= 60");
     }
   });
 });

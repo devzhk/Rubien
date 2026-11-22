@@ -13,7 +13,7 @@ import { registerAttachmentTools } from "./tools/attachments.js";
 
 export const SERVER_INFO = {
   name: "rubien-mcp-server",
-  version: "0.3.6",
+  version: "0.3.7",
 } as const;
 
 export function buildServer(): McpServer {
