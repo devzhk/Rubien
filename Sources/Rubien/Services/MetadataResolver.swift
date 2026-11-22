@@ -31,10 +31,35 @@ struct ManualCandidateImportAssessment {
 struct ManualEntryOutcome: Sendable {
     let result: MetadataResolutionResult
     let preferredPDFURL: String?    // populated only on .verified from paper-URL path
+    /// An unsigned publisher item (no authors on the page or in CrossRef).
+    /// `result` remains its review candidate for batch and retry callers.
+    let authorlessRecord: MetadataResolutionPipeline.AuthorlessPublisherRecord?
 
-    init(result: MetadataResolutionResult, preferredPDFURL: String? = nil) {
+    init(
+        result: MetadataResolutionResult,
+        preferredPDFURL: String? = nil,
+        authorlessRecord: MetadataResolutionPipeline.AuthorlessPublisherRecord? = nil
+    ) {
         self.result = result
         self.preferredPDFURL = preferredPDFURL
+        self.authorlessRecord = authorlessRecord
+    }
+
+    /// The record the Add by Identifier sheet imports: the verified record,
+    /// or an unsigned publisher record, which the sheet shows with a
+    /// no-authors notice so that importing it is the user's review (as in the
+    /// browser extension's confirmation).
+    func importableReference(reviewedBy: String) -> Reference? {
+        if case .verified(let envelope) = result { return envelope.reference }
+        return authorlessRecord.map {
+            MetadataResolutionPipeline.manuallyConfirmedEnvelope(for: $0, reviewedBy: reviewedBy).reference
+        }
+    }
+
+    /// The publisher PDF for `importableReference`.
+    var importablePDFURL: String? {
+        if case .verified = result { return preferredPDFURL }
+        return authorlessRecord?.pdfURL
     }
 }
 
@@ -65,8 +90,12 @@ final class MetadataResolver {
         }
 
         if let identifier = MetadataFetcher.extractIdentifier(from: trimmed) {
-            let (result, scrapedPDFURL) = await resolveIdentifierLocally(identifier, seed: nil, fallback: nil)
-            return ManualEntryOutcome(result: result, preferredPDFURL: scrapedPDFURL)
+            let outcome = await resolveIdentifierLocally(identifier, seed: nil, fallback: nil)
+            return ManualEntryOutcome(
+                result: outcome.result,
+                preferredPDFURL: outcome.preferredPDFURL,
+                authorlessRecord: outcome.authorlessRecord
+            )
         }
 
         // Treat any remaining input as a title search (OpenAlex -> Semantic Scholar)
@@ -93,13 +122,13 @@ final class MetadataResolver {
 
     func resolveSeed(_ seed: MetadataResolutionSeed, fallback: Reference?) async -> MetadataResolutionResult {
         if let doi = seed.doi?.rubien_nilIfBlank {
-            let (result, _) = await resolveIdentifierLocally(.doi(doi), seed: seed, fallback: fallback)
+            let result = await resolveIdentifierLocally(.doi(doi), seed: seed, fallback: fallback).result
             if case .verified = result { return result }
             if case .candidate = result { return result }
             if case .blocked = result { return result }
         }
         if let isbn = seed.isbn?.rubien_nilIfBlank {
-            let (result, _) = await resolveIdentifierLocally(.isbn(isbn), seed: seed, fallback: fallback)
+            let result = await resolveIdentifierLocally(.isbn(isbn), seed: seed, fallback: fallback).result
             if case .verified = result { return result }
             if case .candidate = result { return result }
             if case .blocked = result { return result }
@@ -244,7 +273,7 @@ final class MetadataResolver {
         }
         guard let identifier else { return nil }
 
-        let (localResult, _) = await resolveIdentifierLocally(identifier, seed: seed, fallback: reference)
+        let localResult = await resolveIdentifierLocally(identifier, seed: seed, fallback: reference).result
         let outcome = await refreshOutcome(from: localResult, original: reference)
         switch outcome {
         case .refreshed, .skipped:
@@ -332,13 +361,12 @@ final class MetadataResolver {
         _ identifier: MetadataFetcher.Identifier,
         seed: MetadataResolutionSeed?,
         fallback: Reference?
-    ) async -> (MetadataResolutionResult, scrapedPDFURL: String?) {
-        let outcome = await MetadataResolutionPipeline.resolveIdentifier(
+    ) async -> MetadataResolutionPipeline.IdentifierResolutionOutcome {
+        await MetadataResolutionPipeline.resolveIdentifier(
             identifier,
             seed: seed,
             fallback: fallback
         )
-        return (outcome.result, outcome.preferredPDFURL)
     }
 
     // MARK: - Verification glue

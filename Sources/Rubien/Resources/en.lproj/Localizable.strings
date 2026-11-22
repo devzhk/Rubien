@@ -30,6 +30,8 @@
 "addByIdentifier.error.notFound" = "No matching record found. Try a paper URL or DOI instead.";
 "addByIdentifier.downloadPDFOnImport" = "Download PDF when importing";
 "addByIdentifier.lookupFailed.cardTitle" = "Lookup failed:";
+"addByIdentifier.authorless.cardTitle" = "Found:";
+"addByIdentifier.authorless.notice" = "No authors are listed for this record. Importing adds it without authors.";
 "addByIdentifier.lookupFailed.placeholder" = "Lookup failed";
 
 // MARK: - Batch Import
