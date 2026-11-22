@@ -416,9 +416,9 @@ public enum MetadataFetcher {
                 let given = author["given"] as? String ?? ""
                 let family = author["family"] as? String ?? ""
                 if family.isEmpty { return nil }
-                // CrossRef often swaps given/family for CJK names (e.g. given:"Wu" family:"Haoyun"
+                // Some deposits store Chinese names surname-first (given:"Wu" family:"Haoyun"
                 // instead of given:"Haoyun" family:"Wu"). Detect and correct this.
-                if Self.looksLikeCJKName(given: given, family: family) {
+                if RomanizedChineseName.looksSurnameFirst(given: given, family: family) {
                     return AuthorName(given: family, family: given)
                 }
                 return AuthorName(given: given, family: family)
@@ -1593,21 +1593,6 @@ public enum MetadataFetcher {
     /// CrossRef often returns `{"given":"Wu","family":"Haoyun"}` for Chinese authors
     /// when the correct mapping is `given:"Haoyun", family:"Wu"` (family name is the
     /// shorter, single-character-like segment for Chinese names romanized).
-    private static func looksLikeCJKName(given: String, family: String) -> Bool {
-        let g = given.trimmingCharacters(in: .whitespaces)
-        let f = family.trimmingCharacters(in: .whitespaces)
-        guard !g.isEmpty, !f.isEmpty else { return false }
-        // Only apply heuristic when both parts are ASCII (romanized CJK).
-        let bothAscii = g.allSatisfy { $0.isASCII } && f.allSatisfy { $0.isASCII }
-        guard bothAscii else { return false }
-        // Heuristic: Chinese family names romanized are very short (2-3 chars: Wu, Li, Liu, Gan).
-        // If "given" is a single short word (≤3 chars) and "family" is strictly longer,
-        // the fields are likely swapped. Conservative threshold to avoid false positives
-        // on Western names like "Test"/"Author".
-        let gWords = g.components(separatedBy: " ").filter { !$0.isEmpty }
-        return gWords.count == 1 && g.count <= 3 && f.count > g.count
-    }
-
     // MARK: - Errors
 
     public enum FetchError: LocalizedError {

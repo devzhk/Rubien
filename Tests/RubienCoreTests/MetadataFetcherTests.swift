@@ -240,6 +240,53 @@ final class MetadataFetcherTests: XCTestCase {
         XCTAssertEqual(reference.doi, "10.18307/2023.0320")
     }
 
+    func testParseCrossrefResponseSwapsSurnameFirstTwoSyllableNames() throws {
+        // Same Journal of Lake Sciences record: two-syllable given names deposited
+        // surname-first, also written with a hyphen.
+        let json = """
+        {"message": {"title": ["T"], "author": [
+          {"given": "Gan", "family": "Shengwei"},
+          {"given": "Li", "family": "Xiao-Ming"},
+          {"given": "Chen", "family": "Hong"}
+        ]}}
+        """.data(using: .utf8)!
+
+        let reference = try MetadataFetcher.parseCrossrefResponse(json, doi: "10.18307/2023.0320")
+
+        XCTAssertEqual(reference.authors, [
+            AuthorName(given: "Shengwei", family: "Gan"),
+            AuthorName(given: "Xiao-Ming", family: "Li"),
+            AuthorName(given: "Chen", family: "Hong"),
+        ])
+    }
+
+    func testParseCrossrefResponseKeepsShortGivenNamesInPlace() throws {
+        // Initials (LIGO, 10.1103/PhysRevLett.116.061102), short Western given names, and
+        // correctly ordered Chinese names (Swin Transformer's "Ze Liu") are not swaps.
+        let json = """
+        {"message": {"title": ["T"], "author": [
+          {"given": "R.", "family": "Abbott"},
+          {"given": "B.\\u2009P.", "family": "Abbott"},
+          {"given": "Ian", "family": "Goodfellow"},
+          {"given": "Al", "family": "Gore"},
+          {"given": "Kai", "family": "Lima"},
+          {"given": "Ze", "family": "Liu"},
+          {"given": "Wei", "family": "Wang"},
+          {"given": "Yu", "family": "Zhang"},
+          {"given": "Lei", "family": "Huang"},
+          {"given": "Han", "family": "van der Maas"},
+          {"given": "Li", "family": "---"}
+        ]}}
+        """.data(using: .utf8)!
+
+        let reference = try MetadataFetcher.parseCrossrefResponse(json, doi: "10.1103/PhysRevLett.116.061102")
+
+        XCTAssertEqual(reference.authors.map(\.family), [
+            "Abbott", "Abbott", "Goodfellow", "Gore", "Lima", "Liu", "Wang", "Zhang", "Huang",
+            "van der Maas", "---",
+        ])
+    }
+
     func testParseCrossrefResponseKeepsWesternAuthorNamesUnchanged() throws {
         // Western names with longer given names should NOT be swapped
         let json = """
