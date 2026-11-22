@@ -242,6 +242,72 @@ test('paper groups are chronological, bounded, inert, and expose explicit native
     'later transcript rows do not replace or move the paper group')
 })
 
+test('add to Rubien forwards the declared parent and sibling library IDs only on click', async () => {
+  const { window, R, T, posts } = await boot()
+  R.addPaperGroup({ items: [
+    { kind: 'library', referenceId: 7, title: 'SpeeDiff: Scalable Diffusion', badge: 'PDF' },
+    {
+      kind: 'web',
+      url: 'https://openaccess.thecvf.com/content/CVPR2026/supplemental/SpeeDiff_supp.pdf',
+      title: 'SpeeDiff — CVPR 2026 Supplementary Material',
+      badge: 'Supplement candidate',
+      parentReferenceId: 7,
+    },
+    { kind: 'library', referenceId: 12, title: 'Another saved paper', badge: 'Library' },
+    { kind: 'library', referenceId: 7, title: 'Duplicate saved paper', badge: 'PDF' },
+    {
+      kind: 'web', url: 'https://example.com/related.pdf', title: 'Related paper',
+      badge: 'PDF candidate', parentReferenceId: true,
+    },
+    {
+      kind: 'web', url: 'https://example.com/unsafe.pdf', title: 'Unsafe parent',
+      badge: 'PDF candidate', parentReferenceId: 2 ** 53,
+    },
+  ] })
+  await tick()
+  assert.equal(posts.addPaperSource.length, 0, 'rendering never posts add-source')
+  const buttons = [...T().querySelectorAll('.chat-paper-add-source')]
+  assert.equal(buttons.length, 3)
+
+  buttons[0].dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
+  assert.deepEqual(JSON.parse(JSON.stringify(posts.addPaperSource.at(-1))), {
+    url: 'https://openaccess.thecvf.com/content/CVPR2026/supplemental/SpeeDiff_supp.pdf',
+    title: 'SpeeDiff — CVPR 2026 Supplementary Material',
+    parentReferenceId: 7,
+    siblingReferenceIds: [7, 12],
+  })
+  assert.deepEqual([...posts.addPaperSource.at(-1).siblingReferenceIds], [7, 12])
+
+  for (const button of buttons.slice(1)) {
+    button.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
+    const payload = posts.addPaperSource.at(-1)
+    assert.equal(Object.hasOwn(payload, 'parentReferenceId'), false, 'invalid parent IDs are dropped')
+    assert.deepEqual([...payload.siblingReferenceIds], [7, 12])
+  }
+  assert.equal(posts.addPaperSource.length, 3)
+})
+
+test('add-source sibling IDs stay within one card group and are capped', async () => {
+  const { window, R, T, posts } = await boot()
+  R.addPaperGroup({ items: [{ kind: 'library', referenceId: 1, title: 'Earlier turn', badge: 'PDF' }] })
+  R.addPaperGroup({ items: [
+    ...Array.from({ length: 9 }, (_, i) => ({
+      kind: 'library', referenceId: 200 + i, title: `Saved ${i}`, badge: 'Library',
+    })),
+    { kind: 'web', url: 'https://example.com/supp.pdf', title: 'Lonely supplement', badge: 'PDF candidate' },
+  ] })
+  await tick()
+  const groups = T().querySelectorAll('.chat-paper-group')
+  assert.equal(groups.length, 2)
+  groups[1].querySelector('.chat-paper-add-source')
+    .dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
+  const payload = posts.addPaperSource.at(-1)
+  assert.equal(payload.title, 'Lonely supplement')
+  assert.equal(Object.hasOwn(payload, 'parentReferenceId'), false)
+  assert.deepEqual([...payload.siblingReferenceIds], Array.from({ length: 9 }, (_, i) => 200 + i))
+  assert.ok(payload.siblingReferenceIds.length <= 10)
+})
+
 test('document cards use a responsive two-column grid and neutral actions', async () => {
   const { doc } = await boot()
   const css = [...doc.querySelectorAll('style')].map((style) => style.textContent).join('\n')

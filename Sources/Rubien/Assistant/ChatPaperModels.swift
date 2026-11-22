@@ -13,6 +13,13 @@ struct ChatPaper: Codable, Sendable, Equatable, Identifiable {
     let authors: String?
     let year: Int?
     let badge: String
+    /// Library reference the agent declared this external file supplements
+    /// (`supplementOf`). Web cards only; it only ranks attach suggestions, and
+    /// the user always confirms in the chooser sheet.
+    let parentReferenceId: Int64?
+
+    /// Largest integer JavaScript can carry exactly (2^53 − 1).
+    static let maximumSafeReferenceID: Int64 = 9_007_199_254_740_991
 
     init(
         kind: Kind,
@@ -21,7 +28,8 @@ struct ChatPaper: Codable, Sendable, Equatable, Identifiable {
         title: String,
         authors: String? = nil,
         year: Int?,
-        badge: String
+        badge: String,
+        parentReferenceId: Int64? = nil
     ) {
         self.kind = kind
         self.referenceId = referenceId
@@ -30,6 +38,21 @@ struct ChatPaper: Codable, Sendable, Equatable, Identifiable {
         self.authors = authors
         self.year = year
         self.badge = badge
+        self.parentReferenceId = parentReferenceId
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(Kind.self, forKey: .kind)
+        referenceId = try container.decodeIfPresent(Int64.self, forKey: .referenceId)
+        url = try container.decodeIfPresent(String.self, forKey: .url)
+        title = try container.decode(String.self, forKey: .title)
+        authors = try container.decodeIfPresent(String.self, forKey: .authors)
+        year = try container.decodeIfPresent(Int.self, forKey: .year)
+        badge = try container.decode(String.self, forKey: .badge)
+        // An optional suggestion hint: a malformed value drops the hint, not
+        // the card (history written before the field existed simply omits it).
+        parentReferenceId = (try? container.decodeIfPresent(Int64.self, forKey: .parentReferenceId)) ?? nil
     }
 
     var id: String {
@@ -119,7 +142,21 @@ enum ChatPaperPresentation {
                 else { return nil }
             }
             guard seen.insert(paper.id).inserted else { return nil }
-            guard paper.kind == .web, let url = paper.url else { return paper }
+            guard paper.kind == .web, let url = paper.url else {
+                guard paper.parentReferenceId != nil else { return paper }
+                return ChatPaper(
+                    kind: paper.kind,
+                    referenceId: paper.referenceId,
+                    url: paper.url,
+                    title: paper.title,
+                    authors: paper.authors,
+                    year: paper.year,
+                    badge: paper.badge
+                )
+            }
+            let parentReferenceId = paper.parentReferenceId.flatMap {
+                (1...ChatPaper.maximumSafeReferenceID).contains($0) ? $0 : nil
+            }
 
             // Provider history is durable input and older sessions serialized
             // every external document as "Web candidate". Re-derive the badge
@@ -132,7 +169,8 @@ enum ChatPaperPresentation {
                 title: title,
                 authors: authors,
                 year: paper.year,
-                badge: RubienAppPresentationContract.externalCandidateBadge(for: url)
+                badge: RubienAppPresentationContract.externalCandidateBadge(for: url, title: title),
+                parentReferenceId: parentReferenceId
             )
         }
         return valid.isEmpty ? nil : ChatPaperGroup(items: valid)

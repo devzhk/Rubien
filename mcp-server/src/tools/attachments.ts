@@ -13,10 +13,17 @@ export function registerAttachmentTools(server: McpServer): void {
   }, async (args) => runCliAsTool(["attachment", "list", String(args.referenceId)]));
 
   server.registerTool("rubien_attachment_add", {
-    description: "Attach local PDF or UTF-8 Markdown files to a reference. Returns one added, duplicate, or error result per input. Limits: PDF 250 MiB; Markdown 50 MiB.",
-    inputSchema: { referenceId: z.number().int(), files: z.array(path).min(1) },
+    description: "Attach PDF or UTF-8 Markdown files to a reference. Each entry in files is a local path or an HTTP(S) URL to download (direct .pdf / .md / .markdown links). Optional name sets the display name and requires exactly one entry in files. Returns one added, duplicate, or error result per input; a failed download is an error result. Limits: PDF 250 MiB; Markdown 50 MiB.",
+    inputSchema: { referenceId: z.number().int(), files: z.array(path).min(1),
+      name: z.string().min(1).max(255).optional() },
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, async (args) => runCliAsTool(["attachment", "add", String(args.referenceId), "--", ...args.files]));
+  }, async (args) => runCliAsTool([
+    "attachment", "add", String(args.referenceId),
+    // Options must precede `--`; everything after it is an input.
+    ...flagsFromOptions({ "--name": args.name }),
+    "--", ...args.files,
+  // URL inputs download before importing, so allow the same budget as create.
+  ], { timeoutMs: 300_000 }));
 
   server.registerTool("rubien_attachment_status", {
     description: "Verify an attachment's local bytes and report availability, removal, pending upload intent, and errors. Pending intent does not mean uploaded.",

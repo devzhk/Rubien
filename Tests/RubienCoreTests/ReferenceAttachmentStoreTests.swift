@@ -112,6 +112,55 @@ final class ReferenceAttachmentStoreTests: XCTestCase {
         XCTAssertEqual(try count("attachmentFileJournal"), 0)
     }
 
+    func testImportDisplayNameIsTrimmedAndKeepsOriginalFilename() throws {
+        let result = try store.importFile(at: source(name: "speediff_supp.md"), referenceId: parent.id!,
+                                          displayName: "  SpeeDiff — Supplementary Material \n")
+        XCTAssertFalse(result.wasDuplicate)
+        XCTAssertEqual(result.attachment.displayName, "SpeeDiff — Supplementary Material")
+        XCTAssertEqual(result.attachment.originalFilename, "speediff_supp.md")
+    }
+
+    func testImportWithoutDisplayNameDefaultsToFilename() throws {
+        let item = try store.importFile(at: source(name: "notes.md"), referenceId: parent.id!,
+                                        displayName: nil).attachment
+        XCTAssertEqual(item.displayName, "notes.md")
+        XCTAssertEqual(item.originalFilename, "notes.md")
+    }
+
+    func testInvalidImportDisplayNameIsRejectedBeforeAnyWork() throws {
+        for name in ["", "   \n", String(repeating: "x", count: 256), "bad\0name"] {
+            XCTAssertThrowsError(try store.importFile(at: source(), referenceId: parent.id!, displayName: name)) {
+                XCTAssertEqual($0 as? ReferenceAttachmentError, .invalidName)
+            }
+        }
+        XCTAssertEqual(try store.importFile(at: source(), referenceId: parent.id!,
+                                            displayName: String(repeating: "x", count: 255)).attachment.displayName.count, 255)
+        XCTAssertEqual(try count("referenceAttachment"), 1)
+        XCTAssertEqual(try count("attachmentFileJournal"), 0)
+    }
+
+    func testDuplicateImportKeepsExistingDisplayName() throws {
+        let first = try store.importFile(at: source(), referenceId: parent.id!, displayName: "Original name")
+        let repeatResult = try store.importFile(at: source(name: "again.md"), referenceId: parent.id!,
+                                                displayName: "New name")
+        XCTAssertTrue(repeatResult.wasDuplicate)
+        XCTAssertEqual(repeatResult.attachment.syncId, first.attachment.syncId)
+        XCTAssertEqual(repeatResult.attachment.displayName, "Original name")
+        XCTAssertEqual(try store.attachment(syncId: first.attachment.syncId).displayName, "Original name")
+        XCTAssertEqual(try store.attachment(syncId: first.attachment.syncId).dateModified,
+                       first.attachment.dateModified)
+    }
+
+    func testMarkdownExtensionImportsAsMarkdown() throws {
+        let item = try store.importFile(at: source("# Supplement", name: "supplement.markdown"),
+                                        referenceId: parent.id!).attachment
+        XCTAssertEqual(item.kind, ReferenceAttachmentKind.markdown.rawValue)
+        XCTAssertEqual(item.originalFilename, "supplement.markdown")
+        let managed = try store.verifiedFileURL(syncId: item.syncId)
+        XCTAssertEqual(managed.lastPathComponent, "content.md")
+        XCTAssertEqual(try String(contentsOf: managed, encoding: .utf8), "# Supplement")
+    }
+
     func testDuplicateDetectionDoesNotCrossReferences() throws {
         let first = try add()
         var other = Reference(title: "Other")

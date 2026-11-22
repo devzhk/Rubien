@@ -19,6 +19,9 @@ struct ChatTranscriptView: NSViewRepresentable {
     var onOpenReference: ((Int64) -> Void)? = nil
     var onOpenPaperSource: ((String) -> Void)? = nil
     var onAddPaperSource: ((String) -> Void)? = nil
+    /// When set, receives the validated add-source request (URL plus the
+    /// card's attach-suggestion hints) instead of `onAddPaperSource`.
+    var onAddPaperSourceRequest: ((ChatPaperAddRequest) -> Void)? = nil
 
     private static let logger = RubienLogger(subsystem: "com.rubien.app", category: "AssistantChat")
 
@@ -27,7 +30,8 @@ struct ChatTranscriptView: NSViewRepresentable {
             controller: controller,
             onOpenReference: onOpenReference,
             onOpenPaperSource: onOpenPaperSource,
-            onAddPaperSource: onAddPaperSource)
+            onAddPaperSource: onAddPaperSource,
+            onAddPaperSourceRequest: onAddPaperSourceRequest)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -85,7 +89,8 @@ struct ChatTranscriptView: NSViewRepresentable {
         context.coordinator.updateCallbacks(
             onOpenReference: onOpenReference,
             onOpenPaperSource: onOpenPaperSource,
-            onAddPaperSource: onAddPaperSource)
+            onAddPaperSource: onAddPaperSource,
+            onAddPaperSourceRequest: onAddPaperSourceRequest)
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -114,27 +119,32 @@ struct ChatTranscriptView: NSViewRepresentable {
         private var onOpenReference: ((Int64) -> Void)?
         private var onOpenPaperSource: ((String) -> Void)?
         private var onAddPaperSource: ((String) -> Void)?
+        private var onAddPaperSourceRequest: ((ChatPaperAddRequest) -> Void)?
 
         init(
             controller: ChatTranscriptController,
             onOpenReference: ((Int64) -> Void)?,
             onOpenPaperSource: ((String) -> Void)?,
-            onAddPaperSource: ((String) -> Void)?
+            onAddPaperSource: ((String) -> Void)?,
+            onAddPaperSourceRequest: ((ChatPaperAddRequest) -> Void)?
         ) {
             self.controller = controller
             self.onOpenReference = onOpenReference
             self.onOpenPaperSource = onOpenPaperSource
             self.onAddPaperSource = onAddPaperSource
+            self.onAddPaperSourceRequest = onAddPaperSourceRequest
         }
 
         func updateCallbacks(
             onOpenReference: ((Int64) -> Void)?,
             onOpenPaperSource: ((String) -> Void)?,
-            onAddPaperSource: ((String) -> Void)?
+            onAddPaperSource: ((String) -> Void)?,
+            onAddPaperSourceRequest: ((ChatPaperAddRequest) -> Void)?
         ) {
             self.onOpenReference = onOpenReference
             self.onOpenPaperSource = onOpenPaperSource
             self.onAddPaperSource = onAddPaperSource
+            self.onAddPaperSourceRequest = onAddPaperSourceRequest
         }
 
         // WKScriptMessageHandler delivers on the main thread; hop onto the main
@@ -174,11 +184,14 @@ struct ChatTranscriptView: NSViewRepresentable {
                     onOpenPaperSource?(urlString)
 
                 case "addPaperSource":
-                    guard let dict = body as? [String: Any],
-                          let urlString = dict["url"] as? String,
-                          ChatExternalLink.classify(urlString) != .reject
-                    else { return }
-                    onAddPaperSource?(urlString)
+                    // Validates the URL like openPaperSource and the optional
+                    // parent/sibling hints like openPaperReference.
+                    guard let request = ChatPaperAddRequest(messageBody: body) else { return }
+                    if let onAddPaperSourceRequest {
+                        onAddPaperSourceRequest(request)
+                    } else {
+                        onAddPaperSource?(request.url)
+                    }
 
                 case "copyCode":
                     guard let dict = body as? [String: Any],

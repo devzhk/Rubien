@@ -465,7 +465,10 @@ function normalizePaperGroup(value) {
       const key = `web:${url}`
       if (seen.has(key)) continue
       seen.add(key)
-      papers.push({ kind: 'web', url, title, authors, year, badge })
+      const parentReferenceId = Number.isSafeInteger(raw.parentReferenceId) && raw.parentReferenceId > 0
+        ? raw.parentReferenceId
+        : null
+      papers.push({ kind: 'web', url, title, authors, year, badge, parentReferenceId })
     }
   }
   return papers
@@ -521,12 +524,45 @@ function makePaperCard(paper) {
     add.type = 'button'
     add.className = 'chat-paper-action chat-paper-add-source'
     add.dataset.url = paper.url
+    add.dataset.title = paper.title
+    if (paper.parentReferenceId != null) {
+      add.dataset.parentReferenceId = String(paper.parentReferenceId)
+    }
     add.textContent = 'Add to Rubien…'
     actions.appendChild(open)
     actions.appendChild(add)
     root.appendChild(actions)
   }
   return root
+}
+
+function positiveReferenceId(raw) {
+  if (typeof raw !== 'string' || !/^[1-9][0-9]*$/.test(raw)) return null
+  const value = Number(raw)
+  return Number.isSafeInteger(value) ? value : null
+}
+
+// The add-source payload carries suggestion hints only: Swift re-checks every
+// ID against the database and the user confirms before anything is attached.
+function addPaperSourcePayload(button) {
+  const payload = {
+    url: button.dataset.url || '',
+    title: button.dataset.title || '',
+    siblingReferenceIds: [],
+  }
+  const parentReferenceId = positiveReferenceId(button.dataset.parentReferenceId)
+  if (parentReferenceId != null) payload.parentReferenceId = parentReferenceId
+  const group = button.closest('.chat-paper-group')
+  if (group) {
+    for (const card of group.querySelectorAll('.chat-paper-library')) {
+      if (payload.siblingReferenceIds.length >= MAX_PAPER_CARDS) break
+      const id = positiveReferenceId(card.dataset.referenceId)
+      if (id != null && !payload.siblingReferenceIds.includes(id)) {
+        payload.siblingReferenceIds.push(id)
+      }
+    }
+  }
+  return payload
 }
 
 function makePaperGroup(value) {
@@ -723,7 +759,7 @@ function installDelegates() {
     const addSource = e.target.closest('.chat-paper-add-source')
     if (addSource) {
       e.preventDefault()
-      post('addPaperSource', { url: addSource.dataset.url || '' })
+      post('addPaperSource', addPaperSourcePayload(addSource))
       return
     }
     // Copy button on a code block.

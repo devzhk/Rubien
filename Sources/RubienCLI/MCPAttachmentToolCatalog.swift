@@ -4,6 +4,8 @@ import RubienCore
 enum MCPAttachmentToolCatalog {
     private static let id: [String: Any] = ["type": "string", "minLength": 1, "description": "Attachment UUID"]
     private static let path: [String: Any] = ["type": "string", "minLength": 1]
+    /// Kept word-for-word with `mcp-server/src/tools/attachments.ts`.
+    private static let addDescription = "Attach PDF or UTF-8 Markdown files to a reference. Each entry in files is a local path or an HTTP(S) URL to download (direct .pdf / .md / .markdown links). Optional name sets the display name and requires exactly one entry in files. Returns one added, duplicate, or error result per input; a failed download is an error result. Limits: PDF 250 MiB; Markdown 50 MiB."
 
     static let tools: [MCPTool] = [
         MCPTool(name: "rubien_attachment_list", description: "List a reference's supplementary attachments with local existence and size checks. Use attachment status to verify contents. Reports the active sync session’s transfer state.",
@@ -11,10 +13,18 @@ enum MCPAttachmentToolCatalog {
             isImage: false, buildArgv: { args in
                 ["attachment", "list", String(try mcpInt(args, "referenceId")!)]
             }),
-        MCPTool(name: "rubien_attachment_add", description: "Attach local PDF or UTF-8 Markdown files to a reference. Returns one added, duplicate, or error result per input. Limits: PDF 250 MiB; Markdown 50 MiB.",
-            inputSchema: ["type": "object", "properties": ["referenceId": ["type": "integer"], "files": ["type": "array", "items": path, "minItems": 1]], "required": ["referenceId", "files"]],
-            access: .write, isImage: false, buildArgv: { args in
-                ["attachment", "add", String(try mcpInt(args, "referenceId")!), "--"] + (try mcpStringArray(args, "files")!)
+        MCPTool(name: "rubien_attachment_add", description: addDescription,
+            inputSchema: ["type": "object", "properties": [
+                "referenceId": ["type": "integer"],
+                "files": ["type": "array", "items": path, "minItems": 1],
+                "name": ["type": "string", "minLength": 1, "maxLength": 255]],
+                "required": ["referenceId", "files"]],
+            // URL inputs download before importing, so allow the same budget as create.
+            access: .write, timeout: 300, isImage: false, buildArgv: { args in
+                var argv = ["attachment", "add", String(try mcpInt(args, "referenceId")!)]
+                // Options must precede `--`; everything after it is an input.
+                mcpAppendString(&argv, "--name", try mcpString(args, "name"))
+                return argv + ["--"] + (try mcpStringArray(args, "files")!)
             }),
         MCPTool(name: "rubien_attachment_status", description: "Verify an attachment's local bytes and report availability, removal, pending upload intent, and errors. Pending intent does not mean uploaded.",
             inputSchema: ["type": "object", "properties": ["id": id], "required": ["id"]],

@@ -37,13 +37,23 @@ public struct ReferenceAttachmentStore: Sendable {
         try database.dbWriter.read { db in try Self.requireAttachment(syncId, db: db) }
     }
 
-    public func importFile(at source: URL, referenceId: Int64) throws -> ReferenceAttachmentImportResult {
-        try withFileLock(wait: true) {
+    /// Imports `source` as a new attachment of `referenceId`. `displayName`
+    /// (trimmed; same rules as `rename`) overrides the default, which is the
+    /// source filename; `originalFilename` always keeps the filename. A
+    /// duplicate (same kind and bytes on this reference) returns the existing
+    /// attachment unchanged — its name is not touched.
+    public func importFile(
+        at source: URL,
+        referenceId: Int64,
+        displayName: String? = nil
+    ) throws -> ReferenceAttachmentImportResult {
+        let explicitName = try displayName.map(Self.validatedDisplayName)
+        return try withFileLock(wait: true) {
             try recoverImportsLocked()
             let kind: ReferenceAttachmentKind
             switch source.pathExtension.lowercased() {
             case "pdf": kind = .pdf
-            case "md": kind = .markdown
+            case "md", "markdown": kind = .markdown
             default: throw ReferenceAttachmentError.unsupportedFile
             }
             #if canImport(Darwin)
@@ -102,7 +112,8 @@ public struct ReferenceAttachmentStore: Sendable {
                     let item = ReferenceAttachment(
                         id: nil, syncId: attachmentID, referenceId: referenceId,
                         referenceSyncId: parent.syncId, kind: kind.rawValue,
-                        originalFilename: source.lastPathComponent, displayName: source.lastPathComponent,
+                        originalFilename: source.lastPathComponent,
+                        displayName: explicitName ?? source.lastPathComponent,
                         byteCount: digest.count, contentHash: digest.hash,
                         dateCreated: now, dateModified: now, deletedAt: nil)
                     try item.insert(db)
@@ -133,11 +144,18 @@ public struct ReferenceAttachmentStore: Sendable {
         }
     }
 
-    public func rename(syncId: String, to name: String) throws {
+    /// Trimmed display name, or `.invalidName` if it is empty, longer than 255
+    /// characters, or contains NUL. Shared by `rename` and `importFile`.
+    public static func validatedDisplayName(_ name: String) throws -> String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 255, !trimmed.contains("\0") else {
             throw ReferenceAttachmentError.invalidName
         }
+        return trimmed
+    }
+
+    public func rename(syncId: String, to name: String) throws {
+        let trimmed = try Self.validatedDisplayName(name)
         try database.dbWriter.write { db in
             let item = try Self.requireAttachment(syncId, db: db)
             guard item.deletedAt == nil else { throw ReferenceAttachmentError.removed }

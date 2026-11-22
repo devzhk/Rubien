@@ -525,6 +525,91 @@ final class MCPServerTests: XCTestCase {
         }
     }
 
+    func testAppPresentationSupplementOfEmitsParentReferenceIdAndValidates() throws {
+        try skipIfBinaryMissing()
+        let parentID = try seedTitle("SpeeDiff: Scalable Pixel-Anchored Diffusion")
+        let deletedID = try seedTitle("Deleted parent")
+        let deletion = try runCLI(["delete", String(deletedID), "--force"])
+        XCTAssertEqual(deletion.exitCode, 0, "seed delete failed: \(deletion.stderr)")
+        let supplementURL = "https://openaccess.thecvf.com/content/CVPR2026/supplemental/SpeeDiff_supp.pdf"
+
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_present_document_cards", arguments: [
+                "items": [
+                    ["referenceId": parentID],
+                    [
+                        "url": supplementURL,
+                        "title": "SpeeDiff — CVPR 2026 Supplementary Material",
+                        "supplementOf": parentID,
+                    ],
+                    ["url": "https://example.com/related", "title": "Related work"],
+                ],
+            ]),
+            toolCall(id: 2, name: "rubien_present_document_cards", arguments: [
+                "items": [["url": supplementURL, "title": "Missing parent", "supplementOf": 999_999]],
+            ]),
+            toolCall(id: 3, name: "rubien_present_document_cards", arguments: [
+                "items": [["url": supplementURL, "title": "Deleted parent", "supplementOf": deletedID]],
+            ]),
+            toolCall(id: 4, name: "rubien_present_document_cards", arguments: [
+                "items": [["url": supplementURL, "title": "String parent", "supplementOf": String(parentID)]],
+            ]),
+            toolCall(id: 5, name: "rubien_present_document_cards", arguments: [
+                "items": [["url": supplementURL, "title": "Boolean parent", "supplementOf": true]],
+            ]),
+            toolCall(id: 6, name: "rubien_present_document_cards", arguments: [
+                "items": [["url": supplementURL, "title": "Zero parent", "supplementOf": 0]],
+            ]),
+            toolCall(id: 7, name: "rubien_present_document_cards", arguments: [
+                "items": [["url": supplementURL, "title": "Fractional parent", "supplementOf": 1.5]],
+            ]),
+            toolCall(id: 8, name: "rubien_present_document_cards", arguments: [
+                "items": [["referenceId": parentID, "supplementOf": parentID]],
+            ]),
+            toolCall(id: 9, name: "rubien_present_document_cards", arguments: [
+                "items": [[
+                    "url": supplementURL,
+                    "title": "Agent-supplied parent title",
+                    "supplementOf": parentID,
+                    "parentTitle": "Not accepted",
+                ]],
+            ]),
+            req(id: 10, method: "tools/list"),
+        ], appPresentation: true)
+
+        let envelope = try XCTUnwrap(try successfulToolJSON(responses, id: 1) as? [String: Any])
+        let items = try XCTUnwrap(envelope["items"] as? [[String: Any]])
+        XCTAssertEqual(items.count, 3)
+        let supplement = try XCTUnwrap(items.first { $0["url"] as? String == supplementURL })
+        XCTAssertEqual((supplement["parentReferenceId"] as? NSNumber)?.intValue, parentID)
+        XCTAssertEqual(supplement["badge"] as? String, "Supplement candidate")
+        XCTAssertNil(supplement["parentTitle"])
+        let related = try XCTUnwrap(items.first { $0["url"] as? String == "https://example.com/related" })
+        XCTAssertNil(related["parentReferenceId"])
+        let library = try XCTUnwrap(items.first { $0["kind"] as? String == "library" })
+        XCTAssertNil(library["parentReferenceId"])
+
+        for id in 2...9 {
+            let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, true, "request \(id) must be rejected: \(result)")
+        }
+
+        let tools = try XCTUnwrap(
+            (response(responses, id: 10)?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let definition = try XCTUnwrap(tools.first { $0["name"] as? String == "rubien_present_document_cards" })
+        let schema = try XCTUnwrap(definition["inputSchema"] as? [String: Any])
+        let itemSchemas = try XCTUnwrap(
+            ((schema["properties"] as? [String: Any])?["items"] as? [String: Any])?["items"] as? [String: Any])
+        let shapes = try XCTUnwrap(itemSchemas["oneOf"] as? [[String: Any]])
+        let webShape = try XCTUnwrap(shapes.first { ($0["required"] as? [String]) == ["url", "title"] })
+        XCTAssertEqual(webShape["additionalProperties"] as? Bool, false)
+        let supplementOf = try XCTUnwrap(
+            (webShape["properties"] as? [String: Any])?["supplementOf"] as? [String: Any])
+        XCTAssertEqual(supplementOf["type"] as? String, "integer")
+        XCTAssertEqual((supplementOf["minimum"] as? NSNumber)?.intValue, 1)
+        XCTAssertTrue((definition["description"] as? String)?.contains("supplementOf") == true)
+    }
+
     func testAppPresentationRejectsOutputOver64KiB() throws {
         try skipIfBinaryMissing()
         // Each title is only a few Swift Characters (so it satisfies maxLength)
@@ -679,6 +764,43 @@ final class MCPServerTests: XCTestCase {
 
         let listed = try runCLI(["list"])
         XCTAssertFalse(listed.stdout.contains("Must Not Be Created"))
+    }
+
+    func testAttachmentAddAdvertisesOptionalNameAndForwardsItBeforeSeparator() throws {
+        try skipIfBinaryMissing()
+        let listed = try runMCP([req(id: 1, method: "tools/list")], readOnly: false)
+        let tools = try XCTUnwrap((response(listed, id: 1)?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let add = try XCTUnwrap(tools.first { $0["name"] as? String == "rubien_attachment_add" })
+        let schema = try XCTUnwrap(add["inputSchema"] as? [String: Any])
+        let name = try XCTUnwrap((schema["properties"] as? [String: Any])?["name"] as? [String: Any])
+        XCTAssertEqual(name["type"] as? String, "string")
+        XCTAssertEqual(name["minLength"] as? Int, 1)
+        XCTAssertEqual(name["maxLength"] as? Int, 255)
+        XCTAssertEqual(Set(schema["required"] as? [String] ?? []), ["referenceId", "files"])
+        XCTAssertTrue((add["description"] as? String)?.contains("HTTP(S) URL") == true)
+
+        let reference = try seedTitle("Attachment parent")
+        let first = testLibraryRoot.appendingPathComponent("--looks-like-a-flag.md")
+        let second = testLibraryRoot.appendingPathComponent("second.md")
+        try Data("first".utf8).write(to: first)
+        try Data("second".utf8).write(to: second)
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_attachment_add",
+                     arguments: ["referenceId": reference, "files": [first.path], "name": "Named supplement"]),
+            toolCall(id: 2, name: "rubien_attachment_add",
+                     arguments: ["referenceId": reference, "files": [first.path, second.path], "name": "Both"]),
+            toolCall(id: 3, name: "rubien_attachment_add",
+                     arguments: ["referenceId": reference, "files": [second.path], "name": ""]),
+        ], readOnly: false)
+        let added = try XCTUnwrap(try successfulToolJSON(responses, id: 1) as? [[String: Any]])
+        let attachment = try XCTUnwrap((added.first?["status"] as? [String: Any])?["attachment"] as? [String: Any])
+        XCTAssertEqual(added.first?["outcome"] as? String, "added")
+        XCTAssertEqual(added.first?["file"] as? String, first.path)
+        XCTAssertEqual(attachment["displayName"] as? String, "Named supplement")
+        for id in 2...3 {
+            let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, true, "request \(id): \(result)")
+        }
     }
 
     func testFullModeExecutesWriteTool() throws {

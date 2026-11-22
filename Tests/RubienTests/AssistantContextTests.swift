@@ -56,6 +56,20 @@ final class AssistantContextTests: XCTestCase {
             reader.contains(AssistantContext.readerReferencePlaceholder))
     }
 
+    func testDefaultPromptsAskForSupplementOfAndReaderListsAttachmentTools() {
+        let library = AssistantContext.defaultPrompt(for: .library)
+        let reader = AssistantContext.defaultPrompt(for: .reader)
+        let resume = AssistantContext.seed(for: .unclassifiedResume)
+        for prompt in [library, reader, resume] {
+            XCTAssertTrue(prompt.contains("set supplementOf to that document's referenceId"), prompt)
+            XCTAssertTrue(prompt.contains("supplement, appendix, supporting information"), prompt)
+            XCTAssertTrue(prompt.contains("the user confirms before anything is attached"), prompt)
+        }
+        XCTAssertTrue(reader.contains("rubien_attachment_list"))
+        XCTAssertTrue(reader.contains("rubien_attachment_read"))
+        XCTAssertFalse(library.contains("rubien_attachment_list"))
+    }
+
     func testUnclassifiedResumeReassertsUniversalRenderingInstructions() {
         let seed = AssistantContext.seed(for: .unclassifiedResume)
 

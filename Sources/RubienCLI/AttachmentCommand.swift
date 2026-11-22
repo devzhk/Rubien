@@ -46,32 +46,82 @@ struct AttachmentList: ParsableCommand {
     }
 }
 
-struct AttachmentAdd: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "add", abstract: "Attach PDF/Markdown files; return one result per input")
+struct AttachmentAdd: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add",
+        abstract: "Attach PDF/Markdown files or HTTP(S) file URLs; return one result per input")
     @Argument var referenceId: Int64
-    @Argument var files: [String]
+    @Argument(help: "Local PDF/Markdown paths, or http(s):// URLs to download")
+    var files: [String]
+    @Option(help: "Display name for the attachment (requires exactly one input)")
+    var name: String?
     struct Result: Encodable {
         let file: String
         let outcome: String
         let status: ReferenceAttachmentStatus?
         let error: String?
     }
-    func run() throws {
+
+    func validate() throws {
         guard !files.isEmpty else { throw ValidationError("Provide at least one PDF or Markdown file") }
+        if name != nil, files.count != 1 {
+            throw ValidationError("--name requires exactly one file or URL")
+        }
+    }
+
+    func run() async throws {
+        let displayName: String?
+        do { displayName = try name.map(ReferenceAttachmentStore.validatedDisplayName) }
+        catch {
+            printJSONError(error.localizedDescription)
+            throw ExitCode.failure
+        }
         let store = attachmentStore()
         var changed = false
-        let results = files.map { path -> Result in
+        var results: [Result] = []
+        for input in files {
             do {
-                let result = try store.importFile(at: attachmentPath(path), referenceId: referenceId)
+                let result = try await Self.importInput(input, into: store, displayName: displayName,
+                                                        referenceId: referenceId)
                 changed = changed || !result.wasDuplicate
-                return Result(file: path, outcome: result.wasDuplicate ? "duplicate" : "added",
-                              status: try store.status(syncId: result.attachment.syncId), error: nil)
+                results.append(Result(file: input, outcome: result.wasDuplicate ? "duplicate" : "added",
+                                      status: try store.status(syncId: result.attachment.syncId), error: nil))
             } catch {
-                return Result(file: path, outcome: "error", status: nil, error: error.localizedDescription)
+                results.append(Result(file: input, outcome: "error", status: nil, error: error.localizedDescription))
             }
         }
         if changed { notifyLibraryChanged() }
         printJSON(results)
+    }
+
+    /// Local paths import in place, exactly as before. Explicit `http://` /
+    /// `https://` inputs download through the shared materializer (the same
+    /// content-type and magic-byte checks as `create`) into a temporary
+    /// directory that is always removed afterwards.
+    private static func importInput(
+        _ input: String,
+        into store: ReferenceAttachmentStore,
+        displayName: String?,
+        referenceId: Int64
+    ) async throws -> ReferenceAttachmentImportResult {
+        guard isHTTPURL(input) else {
+            return try store.importFile(at: attachmentPath(input), referenceId: referenceId,
+                                        displayName: displayName)
+        }
+        // Check the parent before downloading so a bad reference id fails fast.
+        guard try AppDatabase.shared.fetchReferences(ids: [referenceId]).first != nil else {
+            throw ReferenceAttachmentError.missingReference
+        }
+        let materialized = try await ImportSourceMaterializer.materialize(
+            input, localPathPolicy: .requireAbsolute)
+        defer { materialized.cleanup() }
+        return try store.importFile(at: materialized.fileURL, referenceId: referenceId,
+                                    displayName: displayName)
+    }
+
+    private static func isHTTPURL(_ input: String) -> Bool {
+        let lowered = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lowered.hasPrefix("http://") || lowered.hasPrefix("https://")
     }
 }
 
