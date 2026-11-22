@@ -171,35 +171,228 @@ enum WebReaderMathRendering {
         return normalized
     }
 
-    /// KaTeX does not implement LaTeX cross-reference state, so `\label` has
-    /// no reader-visible meaning and otherwise renders as a red unsupported
-    /// command. The remaining rewrites repair a narrow signature emitted by
-    /// Defuddle's historical MathML-to-LaTeX fallback. When the preserved
-    /// MathML contains an equation label, restore it as a KaTeX `\tag`.
+    /// The AMS environments that number their rows unless starred.
+    static let numberedEnvironmentPattern = displayEnvironments
+        .filter { !$0.hasSuffix("*") && $0 != "CD" }
+        .joined(separator: "|")
+
+    /// Chooses between the clip's native MathML and a KaTeX render of its
+    /// preserved `data-latex`. Native MathML stays the source of truth unless
+    /// the TeX is the author's own (WebKit's MathML Core has no `<mlabeledtr>`
+    /// and ignores mtable `columnalign`, so numbered and aligned equations lay
+    /// out wrong) or it carries color that Defuddle's conversion dropped. The
+    /// page's equation numbers move into `\tag`s; KaTeX's `\label` support is
+    /// absent, so labels are stripped, and a narrow signature from Defuddle's
+    /// historical MathML-to-LaTeX fallback is repaired.
     static let latexPreprocessorFunctionJavaScript = #"""
-    function rubienShouldRenderLatexWithKatex(latex, mathEl) {
-      if (!mathEl) return true;
-      const children = mathEl.children;
-      if (!children || typeof children.length !== 'number') return true;
-
-      let hasRenderableMathML = false;
-      for (let i = 0; i < children.length; i++) {
-        const name = String(children[i].localName || children[i].tagName || '')
-          .toLowerCase();
-        if (name && name !== 'annotation') {
-          hasRenderableMathML = true;
-          break;
-        }
-      }
-      if (!hasRenderableMathML) return true;
-
-      // Defuddle/Temml can discard LaTeX-only color styling while producing
-      // otherwise-correct MathML. Re-render only those styled expressions;
-      // native MathML is the semantic source of truth for everything else.
-      return /\\(?:textcolor|color|colorbox|fcolorbox)\b/.test(String(latex || ''));
+    function rubienNodeName(node) {
+      return String((node && (node.localName || node.tagName)) || '').toLowerCase();
     }
 
-    function rubienPrepareLatexForRendering(latex, mathEl) {
+    function rubienHasRenderableMathML(mathEl) {
+      const children = mathEl && mathEl.children;
+      if (!children || typeof children.length !== 'number') return false;
+      for (let i = 0; i < children.length; i++) {
+        const name = rubienNodeName(children[i]);
+        if (name && name !== 'annotation') return true;
+      }
+      return false;
+    }
+
+    function rubienHasTag(latex) {
+      return /\\tag\*?\s*\{/.test(latex);
+    }
+
+    // LaTeX that Defuddle rebuilt from MathML (older clips) writes tables as
+    // `matrix`/`cases` or bare `&`/`\\` and labels as a `(\text{n})` prefix.
+    // These environments and \tag only appear in TeX the author wrote.
+    function rubienLatexIsAuthorSource(latex) {
+      return /\\begin\s*\{(?:\#(numberedEnvironmentPattern)|multline|flalign|split|aligned|alignedat|gathered|array)\*?\}/
+        .test(latex) || rubienHasTag(latex);
+    }
+
+    function rubienEquationLabelText(node) {
+      const match = node && String(node.textContent || '').trim()
+        .match(/^\(\s*([^\\{}$%#&^_~()]+?)\s*\)$/);
+      return match ? match[1] : null;
+    }
+
+    // The equation numbers the source page showed, per row of the numbered
+    // table: the label text, or null for an unnumbered row. [] when nothing is
+    // numbered; null when a label is there but cannot be read safely.
+    function rubienMathMLRowLabels(mathEl) {
+      if (!mathEl || typeof mathEl.querySelectorAll !== 'function') return [];
+      const labeledRows = mathEl.querySelectorAll('mlabeledtr');
+      if (labeledRows.length === 0) {
+        // Defuddle 0.19+ flattens a one-row numbered table into
+        // <mrow>…<mspace width="2em"/><mtext>(n)</mtext></mrow>.
+        let top = mathEl.firstElementChild;
+        if (rubienNodeName(top) === 'semantics') top = top.firstElementChild;
+        const label = rubienNodeName(top) === 'mrow' ? top.lastElementChild : null;
+        const spacer = label && label.previousElementSibling;
+        if (rubienNodeName(spacer) !== 'mspace' || spacer.getAttribute('width') !== '2em') return [];
+        const text = rubienEquationLabelText(label);
+        return text === null ? null : [text];
+      }
+      const table = labeledRows[0].parentElement;
+      if (!table) return null;
+      const labels = [];
+      let labeledCount = 0;
+      for (const row of Array.from(table.children)) {
+        const name = rubienNodeName(row);
+        if (name === 'mtr') labels.push(null);
+        if (name !== 'mlabeledtr') continue;
+        const text = rubienEquationLabelText(row.firstElementChild);
+        if (text === null) return null;
+        labels.push(text);
+        labeledCount++;
+      }
+      return labeledCount === labeledRows.length ? labels : null;
+    }
+
+    // Split an environment body at its own `\\` row breaks, skipping breaks
+    // nested in braces or inner environments. Separators keep a `*` and a
+    // directly attached `[spacing]` so the rows rejoin exactly.
+    function rubienSplitTopLevelRows(body) {
+      const rows = [];
+      const separators = [];
+      let depth = 0;
+      let start = 0;
+      for (let i = 0; i < body.length; i++) {
+        const ch = body[i];
+        if (ch === '{') { depth++; continue; }
+        if (ch === '}') { depth--; continue; }
+        if (ch !== '\\') continue;
+        const rest = body.slice(i);
+        const environment = /^\\(begin|end)\s*\{[^{}]*\}/.exec(rest);
+        if (environment) {
+          depth += environment[1] === 'begin' ? 1 : -1;
+          i += environment[0].length - 1;
+          continue;
+        }
+        if (body[i + 1] === '\\' && depth === 0) {
+          const separator = /^\\\\\*?(?:\[[^\]\\]*\])?/.exec(rest)[0];
+          rows.push(body.slice(start, i));
+          separators.push(separator);
+          start = i + separator.length;
+          i = start - 1;
+          continue;
+        }
+        i++; // escaped character such as \{, \}, \& or a nested \\
+      }
+      rows.push(body.slice(start));
+      return { rows: rows, separators: separators };
+    }
+
+    // Carry the source page's equation numbers into KaTeX as explicit \tag
+    // commands. The numbering environment is starred so KaTeX never invents
+    // its own CSS-counter numbers, which would not match the page. Returns
+    // null when the TeX rows and MathML rows cannot be paired.
+    function rubienApplyEquationLabels(latex, rowLabels) {
+      const labels = rowLabels.filter(function (label) { return label !== null; });
+      const environment = /^\s*\\begin\s*\{(\#(numberedEnvironmentPattern))\*?\}(\{[^{}]*\})?([\s\S]*)\\end\s*\{\1\*?\}\s*$/
+        .exec(latex);
+
+      if (!environment) {
+        // A numbering environment that is not the whole expression would
+        // still get KaTeX's own numbers.
+        if (/\\begin\s*\{(?:\#(numberedEnvironmentPattern))\}/.test(latex)) return null;
+        if (labels.length > 1) return null;
+        if (labels.length === 0 || rubienHasTag(latex)) return latex;
+        return latex + '\\tag{' + labels[0] + '}';
+      }
+
+      const open = '\\begin{' + environment[1] + '*}' + (environment[2] || '');
+      const close = '\\end{' + environment[1] + '*}';
+      if (labels.length === 0) return open + environment[3] + close;
+
+      const split = environment[1] === 'equation'
+        ? { rows: [environment[3]], separators: [] }
+        : rubienSplitTopLevelRows(environment[3]);
+      const rows = split.rows;
+      const separators = split.separators;
+      // A trailing `\\` leaves an empty last row that renderers may drop.
+      if (rows.length === rowLabels.length + 1 && rows[rows.length - 1].trim() === '') {
+        rows.pop();
+        separators.pop();
+      }
+      if (rows.length !== rowLabels.length) return null;
+
+      let body = '';
+      for (let i = 0; i < rows.length; i++) {
+        body += rows[i];
+        if (rowLabels[i] !== null && !rubienHasTag(rows[i])) body += '\\tag{' + rowLabels[i] + '}';
+        if (i < separators.length) body += separators[i];
+      }
+      return open + body + close;
+    }
+
+    // Equation numbers from the preserved MathML, as \tag commands. null when
+    // they cannot be paired with the TeX rows.
+    function rubienNumberLatexFromMathML(latex, mathEl) {
+      const rowLabels = rubienMathMLRowLabels(mathEl);
+      if (rowLabels === null) return null;
+      const labels = rowLabels.filter(function (label) { return label !== null; });
+      if (labels.length === 1) {
+        // LaTeX rebuilt from MathML writes a lone label as `(\text{n})` first.
+        const escapedLabel = labels[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        latex = latex.replace(new RegExp(
+          '^\\s*\\(\\s*(?:\\\\text\\s*\\{\\s*)?' + escapedLabel + '(?:\\s*\\})?\\s*\\)\\s*'
+        ), '');
+      }
+      return rubienApplyEquationLabels(latex, rowLabels);
+    }
+
+    // The LaTeX KaTeX should render in place of this <math>, or null to keep
+    // the native MathML.
+    function rubienLatexForKatexRerender(latex, mathEl) {
+      const source = String(latex || '');
+      const prepared = rubienPrepareLatexForRendering(source);
+      if (!rubienHasRenderableMathML(mathEl)) return prepared;
+      const styled = /\\(?:textcolor|color|colorbox|fcolorbox)\b/.test(source);
+      if (!styled && !rubienLatexIsAuthorSource(source)) return null;
+      const numbered = rubienNumberLatexFromMathML(prepared, mathEl);
+      if (numbered !== null) return numbered;
+      return styled ? prepared : null;
+    }
+
+    // Letters and digits, NFKC-folded so `ℰ` and a script-variant `E` agree.
+    function rubienCountLetters(text, counts, sign) {
+      const letters = String(text || '').normalize('NFKC').match(/[\p{L}\p{N}]/gu) || [];
+      for (const letter of letters) counts[letter] = (counts[letter] || 0) + sign;
+    }
+
+    function rubienMathLetterCounts(mathEl, labels) {
+      const counts = {};
+      rubienCountLetters(mathEl.textContent, counts, 1);
+      for (const annotation of Array.from(mathEl.querySelectorAll('annotation, annotation-xml'))) {
+        rubienCountLetters(annotation.textContent, counts, -1);
+      }
+      for (const label of labels) rubienCountLetters(label, counts, -1);
+      return counts;
+    }
+
+    // KaTeX has its own meaning for some macro names pages redefine (\P, \S,
+    // \Re, …) and renders them without an error. Accept its output only when
+    // it shows the same letters and digits as the native MathML, whose
+    // equation numbers KaTeX keeps out of its own MathML.
+    function rubienKatexMatchesMathML(span, mathEl) {
+      if (!rubienHasRenderableMathML(mathEl) || typeof mathEl.querySelectorAll !== 'function') return true;
+      const rendered = span.querySelector('.katex-mathml math');
+      if (!rendered) return false;
+      const labels = (rubienMathMLRowLabels(mathEl) || []).filter(function (l) { return l !== null; });
+      const expected = rubienMathLetterCounts(mathEl, labels);
+      const actual = rubienMathLetterCounts(rendered, []);
+      const keys = Object.keys(expected).concat(Object.keys(actual));
+      return keys.every(function (key) { return (expected[key] || 0) === (actual[key] || 0); });
+    }
+
+    function rubienTagsOnLeft(mathEl) {
+      return !!(mathEl && typeof mathEl.querySelector === 'function' &&
+        mathEl.querySelector('mtable[side="left"]'));
+    }
+
+    function rubienPrepareLatexForRendering(latex) {
       let prepared = String(latex || '').replace(/\\label\s*\{[^{}]*\}/g, '');
 
       prepared = prepared.replace(
@@ -208,45 +401,23 @@ enum WebReaderMathRendering {
           return '\\underset{' + subscript + '}{\\' + operator + '}';
         }
       );
-      prepared = prepared.replace(
+      return prepared.replace(
         /\\text\s*\{s\}\s*\.\s*\\text\s*\{t\}\s*\./g,
         '\\qquad\\text{s.t.}\\qquad'
       );
-
-      if (!mathEl || typeof mathEl.querySelectorAll !== 'function') return prepared;
-      const labeledRows = mathEl.querySelectorAll('mlabeledtr');
-      if (!labeledRows || labeledRows.length !== 1) return prepared;
-      const labelCell = labeledRows[0].firstElementChild;
-      const labelMatch = labelCell && String(labelCell.textContent || '').trim()
-        .match(/^\(\s*([A-Za-z0-9.-]+)\s*\)$/);
-      if (!labelMatch || /\\tag\s*\{/.test(prepared)) return prepared;
-
-      const label = labelMatch[1];
-      const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const convertedPrefix = new RegExp(
-        '^\\s*\\(\\s*(?:\\\\text\\s*\\{\\s*)?' +
-        escapedLabel +
-        '(?:\\s*\\})?\\s*\\)\\s*'
-      );
-      prepared = prepared.replace(convertedPrefix, '');
-
-      const tag = '\\tag{' + label + '}';
-      const environmentEnd = /\\end\{(equation\*?|align\*?|alignat\*?|gather\*?)\}\s*$/;
-      if (environmentEnd.test(prepared)) {
-        return prepared.replace(environmentEnd, tag + '\\end{$1}');
-      }
-      return prepared + tag;
     }
     """#
 
     /// Kept as a standalone snippet so the invalid-LaTeX fallback can be
     /// exercised without loading a WKWebView in unit tests.
     static let dataLatexRenderAttemptJavaScript = """
-    if (rubienShouldRenderLatexWithKatex(latex, mathEl)) {
-      const preparedLatex = rubienPrepareLatexForRendering(latex, mathEl);
+    const preparedLatex = rubienLatexForKatexRerender(latex, mathEl);
+    if (preparedLatex !== null) {
       try {
-        katex.render(preparedLatex, span, { displayMode: displayMode, throwOnError: true });
-        mathEl.replaceWith(span);
+        katex.render(preparedLatex, span, {
+          displayMode: displayMode, throwOnError: true, leqno: rubienTagsOnLeft(mathEl)
+        });
+        if (rubienKatexMatchesMathML(span, mathEl)) mathEl.replaceWith(span);
       } catch (_) { /* leave <math> intact; browser falls back */ }
     }
     """
@@ -1208,7 +1379,15 @@ final class WebReaderViewModel: ObservableObject {
           </style>
 """
             guard let bundled = bundledClipperReaderStyleBlock() else { return vars }
-            return vars + "\n          <style>\(bundled)</style>\n"
+            // The bundled sheet gives every article SVG `max-width: 100%;
+            // height: auto`, outranking KaTeX's `.katex svg { height: inherit }`.
+            // KaTeX draws stretchy glyphs (braces, arrows, tall radicals) as
+            // 400em-wide SVGs clipped by their wrapper, so that rule squashes
+            // them to a sliver.
+            let katexOverride = """
+            .obsidian-reader-active body .katex svg { max-width: none; height: inherit; border-radius: 0; }
+            """
+            return vars + "\n          <style>\(bundled)\n\(katexOverride)</style>\n"
         }()
         // Keep the clipper's `.theme-light`/`.theme-dark` class in sync with the
         // live OS/app appearance. The bundled ClipperReader.css themes by class,
