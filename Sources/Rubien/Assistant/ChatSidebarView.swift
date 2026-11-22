@@ -174,6 +174,8 @@ struct ChatSurfaceView: View {
     /// admits the turn. This snapshot lets the commit observer clear only the exact
     /// draft that was submitted; a refused turn therefore remains fully retryable.
     @State private var pendingFreshHomeDraft: String?
+    /// The open "Add ‹card›" attach-or-add chooser, if any.
+    @State private var supplementAttach: SupplementAttachPresentation?
     @State private var editingQueuedMessageID: UUID?
     @State private var queuedMessageEditDraft = ""
     @Environment(\.colorScheme) private var colorScheme
@@ -239,8 +241,23 @@ struct ChatSurfaceView: View {
         }) { AssistantSetupView() }
     }
 
-    private var sessionObservingLayout: some View {
+    /// The document-card chooser sheet, kept in its own small property so the
+    /// surface's longer modifier chains stay within CI's type-checker budget.
+    private var supplementAttachLayout: some View {
         layout
+            .sheet(item: $supplementAttach) { presentation in
+                SupplementAttachSheet(
+                    model: presentation.model,
+                    onContinueToNewReference: { url in
+                        supplementAttach = nil
+                        configuration.onAddPaperSource(url)
+                    },
+                    onDismiss: { supplementAttach = nil })
+            }
+    }
+
+    private var sessionObservingLayout: some View {
+        supplementAttachLayout
         .onAppear {
             mentionsReconciledDraft = draft
             renderer.setTheme(colorScheme == .dark ? .dark : .light)
@@ -277,6 +294,33 @@ struct ChatSurfaceView: View {
         // Selection→Ask while the pane is already open — each Ask bumps the token
         // (even re-Asking the same passage), which focuses the composer (§5.4).
         .onChange(of: session.composerFocusRequest) { _, _ in focusComposerSoon() }
+    }
+
+    /// Routes a card's **Add to Rubien…**: attachable files open the chooser
+    /// sheet in this window; paper and web candidates (and surfaces without a
+    /// library database) keep today's add-source route unchanged.
+    private func addPaperSource(_ request: ChatPaperAddRequest) {
+        guard ChatPaperAddRoute.route(request) == .chooser,
+              let database = session.libraryDatabase
+        else {
+            configuration.onAddPaperSource(request.url)
+            return
+        }
+        let context = session.currentConversationContext
+        Task { @MainActor in
+            let resolution = await Task.detached(priority: .userInitiated) {
+                ChatPaperAttachTarget.resolve(
+                    request: request,
+                    context: context,
+                    lookup: .live(database: database))
+            }.value
+            supplementAttach = SupplementAttachPresentation(
+                model: SupplementAttachChoiceModel.live(
+                    request: request,
+                    resolution: resolution,
+                    database: database,
+                    session: session))
+        }
     }
 
     private func draftChanged(from old: String, to new: String) {
@@ -497,7 +541,8 @@ struct ChatSurfaceView: View {
                     controller: renderer,
                     onOpenReference: configuration.onOpenReference,
                     onOpenPaperSource: configuration.onOpenPaperSource,
-                    onAddPaperSource: configuration.onAddPaperSource)
+                    onAddPaperSource: configuration.onAddPaperSource,
+                    onAddPaperSourceRequest: addPaperSource)
                 if let approval = session.pendingApproval {
                     approvalCard(approval)
                 }
@@ -521,7 +566,8 @@ struct ChatSurfaceView: View {
                         controller: renderer,
                         onOpenReference: configuration.onOpenReference,
                         onOpenPaperSource: configuration.onOpenPaperSource,
-                        onAddPaperSource: configuration.onAddPaperSource)
+                        onAddPaperSource: configuration.onAddPaperSource,
+                        onAddPaperSourceRequest: addPaperSource)
                 }
                 if !session.hasMessages {
                     startPage

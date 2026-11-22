@@ -1181,6 +1181,14 @@ final class ChatSessionController: ObservableObject {
             queuedBatchCount: batch.count)
     }
 
+    /// The conversation's effective scope (read-only). Document-card actions use
+    /// it to suggest the current paper as an attach target.
+    var currentConversationContext: AssistantConversationContext { activeConversationContext }
+
+    /// The library database of the production composition root, nil in test and
+    /// debug roots. Document-card attach suggestions and attaching read it.
+    var libraryDatabase: AppDatabase? { conversationDatabase }
+
     /// Searches the user's library for the composer's `@paper` popover. The
     /// injected production closure performs SQLite work off-main; keeping the
     /// controller database-agnostic preserves the test/debug composition roots.

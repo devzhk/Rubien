@@ -1,7 +1,11 @@
 # Attach supplementary files from Assistant document cards
 
 **Date:** 2026-11-21
-**Status:** Design approved 2026-11-21 (decisions in §9). Not yet implemented.
+**Status:** Design approved 2026-11-21 (decisions in §9). Phases 1 and 2
+implemented with focused tests. The CLI URL attach was smoke-tested against a
+loopback server. The chooser sheet has not yet been checked on screen. Surfaces
+without a library database (test/debug roots, scheduled-run transcripts) keep
+today's Add Reference route.
 **Scope:** Assistant document cards and a new chooser sheet (app),
 `ReferenceAttachmentStore` and a supplement URL detector (Core),
 `rubien-cli attachment add`, native and npm MCP.
@@ -76,8 +80,11 @@ the library window.
 
 **Default selection:**
 
-- The top suggestion (§4) when there is one.
-- Otherwise **Add as a new reference**, which is today's outcome.
+- The top suggestion (§4), when the agent declared it or the candidate looks
+  supplementary.
+- Otherwise **Add as a new reference**, which is today's outcome. For example, a
+  related paper's PDF in a reader chat lists the current paper as a row but does
+  not preselect it.
 
 **Suggestion rows:**
 
@@ -134,8 +141,9 @@ The resolver ranks, then deduplicates:
 1. **Declared by the agent:** `parentReferenceId`, re-checked as existing and not
    deleted.
 2. **Current paper:** for `.reference(R)` the target is `R`; for `.attachment(A)`
-   it is A's parent. This applies when the candidate looks supplementary, or when
-   nothing else matches.
+   it is A's parent. It is always listed, because the `@` mention search
+   excludes the current paper and the row would otherwise be unreachable. It is
+   preselected only under the §3 rule.
 3. **Shown above:** a library card in the same group whose short title (before
    the first `:` / ` — `) appears in the candidate title, when the candidate
    looks supplementary.

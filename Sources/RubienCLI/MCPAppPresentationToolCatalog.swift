@@ -15,7 +15,7 @@ enum MCPAppPresentationToolCatalog {
 
     private static let presentDocumentCardsTool = MCPTool(
         name: toolName,
-        description: "Present every openable document intentionally referenced in this response as clickable Rubien cards. Call this tool exactly once with up to \(maximumItemCount) saved library documents and external document URLs the user should be able to open. Include authors and year for external documents when known; Rubien classifies each URL as a paper, PDF/document, or web candidate. Keep explanations and reasons in response prose, never in the arguments.",
+        description: "Present every openable document intentionally referenced in this response as clickable Rubien cards. Call this tool exactly once with up to \(maximumItemCount) saved library documents and external document URLs the user should be able to open. Include authors and year for external documents when known; Rubien classifies each URL as a paper, PDF/document, or web candidate. When an external file is supplementary material (supplement, appendix, supporting information) of a saved library document, set supplementOf to that document's referenceId; the user confirms before anything is attached. Keep explanations and reasons in response prose, never in the arguments.",
         inputSchema: [
             "type": "object",
             "properties": [
@@ -48,6 +48,7 @@ enum MCPAppPresentationToolCatalog {
                                         "maxLength": maximumAuthorsLength,
                                     ],
                                     "year": ["type": "integer", "minimum": 1, "maximum": 9999],
+                                    "supplementOf": ["type": "integer", "minimum": 1],
                                 ],
                                 "required": ["url", "title"],
                                 "additionalProperties": false,
@@ -128,13 +129,13 @@ enum MCPAppPresentationToolCatalog {
                 continue
             }
 
-            let allowedKeys: Set<String> = ["url", "title", "authors", "year"]
+            let allowedKeys: Set<String> = ["url", "title", "authors", "year", "supplementOf"]
             guard keys.isSubset(of: allowedKeys),
                   keys.contains("url"),
                   keys.contains("title")
             else {
                 throw MCPToolError.invalidArguments(
-                    "Each item must be exactly a referenceId object or a url/title object with optional authors/year"
+                    "Each item must be exactly a referenceId object or a url/title object with optional authors/year/supplementOf"
                 )
             }
             guard let rawURL = item["url"] as? String,
@@ -173,6 +174,21 @@ enum MCPAppPresentationToolCatalog {
             } else {
                 year = nil
             }
+            let parentReferenceID: Int64?
+            if let rawParent = item["supplementOf"] {
+                guard let integerParent = mcpExactInt(rawParent),
+                      integerParent > 0,
+                      let parentID = Int64(exactly: integerParent)
+                else {
+                    throw MCPToolError.invalidArguments("`supplementOf` must be a positive integer referenceId")
+                }
+                guard try database.fetchReferences(ids: [parentID]).first != nil else {
+                    throw MCPToolError.invalidArguments("`supplementOf` reference \(parentID) does not exist")
+                }
+                parentReferenceID = parentID
+            } else {
+                parentReferenceID = nil
+            }
             let key = webDeduplicationKey(url)
             guard seenWeb.insert(key).inserted else { continue }
             var card: [String: Any] = [
@@ -184,6 +200,7 @@ enum MCPAppPresentationToolCatalog {
             ]
             if let authors { card["authors"] = authors }
             if let year { card["year"] = year }
+            if let parentReferenceID { card["parentReferenceId"] = parentReferenceID }
             result.append(card)
         }
 

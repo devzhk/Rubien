@@ -232,5 +232,49 @@ final class ChatPaperPresentationTests: XCTestCase {
         }
         XCTAssertTrue(ChatPaperPresentation.isPresentationTool(name))
     }
+
+    func testParentReferenceIdRoundTripsThroughHistory() throws {
+        let body = #"{"items":[{"kind":"library","referenceId":7,"title":"SpeeDiff","badge":"PDF"},{"kind":"web","url":"https://openaccess.thecvf.com/content/CVPR2026/supplemental/SpeeDiff_supp.pdf","title":"SpeeDiff Supplementary Material","badge":"PDF candidate","parentReferenceId":7}]}"#
+
+        let group = try XCTUnwrap(ChatPaperPresentation.decodeHistoryGroup(body))
+        XCTAssertEqual(group.items.map(\.parentReferenceId), [nil, 7])
+        XCTAssertEqual(group.items.last?.badge, "Supplement candidate")
+
+        let encoded = try XCTUnwrap(ChatPaperPresentation.encodeHistoryGroup(group))
+        XCTAssertTrue(encoded.contains(#""parentReferenceId":7"#), encoded)
+        let restored = try XCTUnwrap(ChatPaperPresentation.decodeHistoryGroup(encoded))
+        XCTAssertEqual(restored, group)
+    }
+
+    func testOldHistoryWithoutParentReferenceIdStillDecodes() throws {
+        let body = #"{"items":[{"kind":"web","url":"https://example.com/paper.pdf","title":"Old Card","badge":"Web candidate"}]}"#
+
+        let group = try XCTUnwrap(ChatPaperPresentation.decodeHistoryGroup(body))
+
+        XCTAssertEqual(group.items.count, 1)
+        XCTAssertNil(group.items.first?.parentReferenceId)
+        let encoded = try XCTUnwrap(ChatPaperPresentation.encodeHistoryGroup(group))
+        XCTAssertFalse(encoded.contains("parentReferenceId"), encoded)
+    }
+
+    func testInvalidParentReferenceIdDropsFieldNotCard() throws {
+        let invalidValues = ["0", "-3", "9007199254740992", "1.5", "true", #""7""#, "null", "1e30"]
+        for value in invalidValues {
+            let body = #"{"items":[{"kind":"web","url":"https://example.com/supp.pdf","title":"Supplement","badge":"PDF candidate","parentReferenceId":"# + value + "}]}"
+            let group = try XCTUnwrap(
+                ChatPaperPresentation.decodeHistoryGroup(body), "card dropped for \(value)")
+            XCTAssertEqual(group.items.count, 1, value)
+            XCTAssertNil(group.items.first?.parentReferenceId, value)
+        }
+    }
+
+    func testLibraryCardDropsParentReferenceId() throws {
+        let body = #"{"items":[{"kind":"library","referenceId":3,"title":"Library Paper","badge":"PDF","parentReferenceId":9}]}"#
+
+        let group = try XCTUnwrap(ChatPaperPresentation.decodeHistoryGroup(body))
+
+        XCTAssertEqual(group.items.first?.referenceId, 3)
+        XCTAssertNil(group.items.first?.parentReferenceId)
+    }
 }
 #endif
