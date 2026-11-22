@@ -4,7 +4,7 @@
 //
 // To upgrade Defuddle:
 //   1. cd scripts/clipper && npm update defuddle
-//   2. npm run build
+//   2. npm run build && npm test
 //   3. Commit package.json, package-lock.json, and the regenerated
 //      Sources/Rubien/Resources/ClipperDefuddle.js together.
 
