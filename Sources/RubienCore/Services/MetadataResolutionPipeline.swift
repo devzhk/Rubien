@@ -16,10 +16,37 @@ public enum MetadataResolutionPipeline {
     public struct IdentifierResolutionOutcome: Sendable {
         public let result: MetadataResolutionResult
         public let preferredPDFURL: String?
+        /// Set when a publisher page resolved but neither the page nor
+        /// CrossRef lists authors (unsigned items such as Nature Research
+        /// Highlights). `result` stays the review candidate, so automatic
+        /// verification still never accepts an authorless record; a front door
+        /// whose user sees and confirms the record itself (the browser popup)
+        /// may save it with `manuallyConfirmedEnvelope(for:reviewedBy:)`.
+        public let authorlessRecord: AuthorlessPublisherRecord?
 
-        public init(result: MetadataResolutionResult, preferredPDFURL: String? = nil) {
+        public init(
+            result: MetadataResolutionResult,
+            preferredPDFURL: String? = nil,
+            authorlessRecord: AuthorlessPublisherRecord? = nil
+        ) {
             self.result = result
             self.preferredPDFURL = preferredPDFURL
+            self.authorlessRecord = authorlessRecord
+        }
+    }
+
+    /// A publisher record whose identity resolved without any listed authors.
+    public struct AuthorlessPublisherRecord: Sendable {
+        /// The resolved record, merged with the caller's fallback for
+        /// non-author fields. Authors stay as the publisher and CrossRef
+        /// report them (empty): a captured page byline is not citation data.
+        public let reference: Reference
+        /// The publisher PDF the resolver found for this record, if any.
+        public let pdfURL: String?
+
+        public init(reference: Reference, pdfURL: String?) {
+            self.reference = reference
+            self.pdfURL = pdfURL
         }
     }
 
@@ -143,13 +170,12 @@ public enum MetadataResolutionPipeline {
                 result: result,
                 preferredPDFURL: preferredPDFURL
             )
-        } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialReference, _) {
-            return IdentifierResolutionOutcome(
-                result: .candidate(candidateEnvelopeForNoAuthors(
-                    partialReference: partialReference,
-                    seed: seed,
-                    fallback: fallback
-                ))
+        } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialReference, let scrapedPDFURL) {
+            return noAuthorsOutcome(
+                partialReference: partialReference,
+                scrapedPDFURL: scrapedPDFURL,
+                seed: seed,
+                fallback: fallback
             )
         } catch {
             metadataResolutionPipelineLog.error(
@@ -340,6 +366,52 @@ public enum MetadataResolutionPipeline {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func noAuthorsOutcome(
+        partialReference: Reference,
+        scrapedPDFURL: String?,
+        seed: MetadataResolutionSeed?,
+        fallback: Reference?
+    ) -> IdentifierResolutionOutcome {
+        var reference = fallback.map {
+            MetadataResolution.mergeReference(primary: partialReference, fallback: $0)
+        } ?? partialReference
+        reference.authors = partialReference.authors
+        return IdentifierResolutionOutcome(
+            result: .candidate(candidateEnvelopeForNoAuthors(
+                partialReference: partialReference,
+                seed: seed,
+                fallback: fallback
+            )),
+            authorlessRecord: AuthorlessPublisherRecord(
+                reference: reference,
+                pdfURL: scrapedPDFURL?.rubien_nilIfBlank
+            )
+        )
+    }
+
+    /// Saves an authorless publisher record the user has reviewed and
+    /// confirmed, with the same identifier evidence an automatic match records.
+    public static func manuallyConfirmedEnvelope(
+        for record: AuthorlessPublisherRecord,
+        reviewedBy: String
+    ) -> VerifiedEnvelope {
+        let evidence = buildGenericEvidence(
+            for: record.reference,
+            fetchMode: .identifier,
+            origin: .identifierAPI,
+            recordKey: normalizedIdentifier(record.reference.doi),
+            exactIdentifierMatch: true
+        )
+        return VerifiedEnvelope(
+            reference: MetadataVerifier.manuallyVerified(
+                record.reference,
+                evidence: evidence,
+                reviewedBy: reviewedBy
+            ),
+            evidence: evidence
+        )
     }
 
     /// Direct publisher resolution can establish the record identity while

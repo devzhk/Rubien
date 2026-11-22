@@ -1,0 +1,98 @@
+<!-- SOURCE: https://www.nature.com/articles/s41586-020-2649-2 -->
+<!-- CAPTURED: 2026-11-21 (head meta tags only, trimmed; curl -A "Rubien/1.0") -->
+<!DOCTYPE html>
+<html lang="en"><head>
+<title>Array programming with NumPy | Nature</title>
+<meta name="dc.title" content="Array programming with NumPy"/>
+<meta name="dc.source" content="Nature 2020 585:7825"/>
+<meta name="dc.format" content="text/html"/>
+<meta name="dc.publisher" content="Nature Publishing Group"/>
+<meta name="dc.date" content="2020-09-16"/>
+<meta name="dc.type" content="ReviewPaper"/>
+<meta name="dc.language" content="En"/>
+<meta name="dc.copyright" content="2020 The Author(s)"/>
+<meta name="dc.rights" content="2020 The Author(s)"/>
+<meta name="dc.rightsAgent" content="journalpermissions@springernature.com"/>
+<meta name="dc.description" content="Array programming provides a powerful, compact and expressive syntax for accessing, manipulating and operating on data in vectors, matrices and higher-dimensional arrays. NumPy is the primary array programming library for the Python language. It has an essential role in research analysis pipelines in fields as diverse as physics, chemistry, astronomy, geoscience, biology, psychology, materials science, engineering, finance and economics. For example, in astronomy, NumPy was an important part of the software stack used in the discovery of gravitational waves1 and in the first imaging of a black hole2. Here we review how a few fundamental array concepts lead to a simple and powerful programming paradigm for organizing, exploring and analysing scientific data. NumPy is the foundation upon which the scientific Python ecosystem is constructed. It is so pervasive that several projects, targeting audiences with specialized needs, have developed their own NumPy-like interfaces and array objects. Owing to its central position in the ecosystem, NumPy increasingly acts as an interoperability layer between such array computation libraries and, together with its application programming interface (API), provides a flexible framework to support the next decade of scientific and industrial analysis. NumPy is the primary array programming library for Python; here its fundamental concepts are reviewed and its evolution into a flexible interoperability layer between increasingly specialized computational libraries is discussed."/>
+<meta name="prism.issn" content="1476-4687"/>
+<meta name="prism.publicationName" content="Nature"/>
+<meta name="prism.publicationDate" content="2020-09-16"/>
+<meta name="prism.volume" content="585"/>
+<meta name="prism.number" content="7825"/>
+<meta name="prism.section" content="ReviewPaper"/>
+<meta name="prism.startingPage" content="357"/>
+<meta name="prism.endingPage" content="362"/>
+<meta name="prism.copyright" content="2020 The Author(s)"/>
+<meta name="prism.rightsAgent" content="journalpermissions@springernature.com"/>
+<meta name="prism.url" content="https://www.nature.com/articles/s41586-020-2649-2"/>
+<meta name="prism.doi" content="doi:10.1038/s41586-020-2649-2"/>
+<meta name="citation_pdf_url" content="https://www.nature.com/articles/s41586-020-2649-2.pdf"/>
+<meta name="citation_journal_title" content="Nature"/>
+<meta name="citation_publisher" content="Nature Publishing Group"/>
+<meta name="citation_issn" content="1476-4687"/>
+<meta name="citation_title" content="Array programming with NumPy"/>
+<meta name="citation_volume" content="585"/>
+<meta name="citation_issue" content="7825"/>
+<meta name="citation_publication_date" content="2020/09"/>
+<meta name="citation_firstpage" content="357"/>
+<meta name="citation_lastpage" content="362"/>
+<meta name="dc.identifier" content="doi:10.1038/s41586-020-2649-2"/>
+<meta name="citation_doi" content="10.1038/s41586-020-2649-2"/>
+<meta name="dc.creator" content="Harris, Charles R."/>
+<meta name="dc.creator" content="Millman, K. Jarrod"/>
+<meta name="dc.creator" content="van der Walt, St&#233;fan J."/>
+<meta name="dc.creator" content="Gommers, Ralf"/>
+<meta name="dc.creator" content="Virtanen, Pauli"/>
+<meta name="dc.creator" content="Cournapeau, David"/>
+<meta name="dc.creator" content="Wieser, Eric"/>
+<meta name="dc.creator" content="Taylor, Julian"/>
+<meta name="dc.creator" content="Berg, Sebastian"/>
+<meta name="dc.creator" content="Smith, Nathaniel J."/>
+<meta name="dc.creator" content="Kern, Robert"/>
+<meta name="dc.creator" content="Picus, Matti"/>
+<meta name="dc.creator" content="Hoyer, Stephan"/>
+<meta name="dc.creator" content="van Kerkwijk, Marten H."/>
+<meta name="dc.creator" content="Brett, Matthew"/>
+<meta name="dc.creator" content="Haldane, Allan"/>
+<meta name="dc.creator" content="del R&#237;o, Jaime Fern&#225;ndez"/>
+<meta name="dc.creator" content="Wiebe, Mark"/>
+<meta name="dc.creator" content="Peterson, Pearu"/>
+<meta name="dc.creator" content="G&#233;rard-Marchant, Pierre"/>
+<meta name="dc.creator" content="Sheppard, Kevin"/>
+<meta name="dc.creator" content="Reddy, Tyler"/>
+<meta name="dc.creator" content="Weckesser, Warren"/>
+<meta name="dc.creator" content="Abbasi, Hameer"/>
+<meta name="dc.creator" content="Gohlke, Christoph"/>
+<meta name="dc.creator" content="Oliphant, Travis E."/>
+<meta name="dc.subject" content="Computational neuroscience"/>
+<meta name="dc.subject" content="Solar physics"/>
+<meta name="dc.subject" content="Computational science"/>
+<meta name="dc.subject" content="Computer science"/>
+<meta name="dc.subject" content="Software"/>
+<meta name="citation_author" content="Harris, Charles R."/>
+<meta name="citation_author" content="Millman, K. Jarrod"/>
+<meta name="citation_author" content="van der Walt, St&#233;fan J."/>
+<meta name="citation_author" content="Gommers, Ralf"/>
+<meta name="citation_author" content="Virtanen, Pauli"/>
+<meta name="citation_author" content="Cournapeau, David"/>
+<meta name="citation_author" content="Wieser, Eric"/>
+<meta name="citation_author" content="Taylor, Julian"/>
+<meta name="citation_author" content="Berg, Sebastian"/>
+<meta name="citation_author" content="Smith, Nathaniel J."/>
+<meta name="citation_author" content="Kern, Robert"/>
+<meta name="citation_author" content="Picus, Matti"/>
+<meta name="citation_author" content="Hoyer, Stephan"/>
+<meta name="citation_author" content="van Kerkwijk, Marten H."/>
+<meta name="citation_author" content="Brett, Matthew"/>
+<meta name="citation_author" content="Haldane, Allan"/>
+<meta name="citation_author" content="del R&#237;o, Jaime Fern&#225;ndez"/>
+<meta name="citation_author" content="Wiebe, Mark"/>
+<meta name="citation_author" content="Peterson, Pearu"/>
+<meta name="citation_author" content="G&#233;rard-Marchant, Pierre"/>
+<meta name="citation_author" content="Sheppard, Kevin"/>
+<meta name="citation_author" content="Reddy, Tyler"/>
+<meta name="citation_author" content="Weckesser, Warren"/>
+<meta name="citation_author" content="Abbasi, Hameer"/>
+<meta name="citation_author" content="Gohlke, Christoph"/>
+<meta name="citation_author" content="Oliphant, Travis E."/>
+</head><body><p>Article body omitted.</p></body></html>

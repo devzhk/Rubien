@@ -38,6 +38,12 @@ When a fixture starts failing (because a site redesigned its meta tags):
 | springer-chapter.html | https://link.springer.com/chapter/... (capture before shipping) |
 | acm-dl.html | https://dl.acm.org/doi/... (capture before shipping) |
 | sciencedirect-article.html | https://www.sciencedirect.com/science/article/pii/... (capture before shipping) |
+| nature-research-highlight.html | https://www.nature.com/articles/d41586-026-03638-3 (captured 2026-11-21; Dublin Core / PRISM only, unsigned) |
+| nature-news-signed.html | https://www.nature.com/articles/d41586-026-03672-1 (captured 2026-11-21; Dublin Core / PRISM only, `dc.creator`) |
+| nature-article-citation-and-dc.html | https://www.nature.com/articles/s41586-020-2649-2 (captured 2026-11-21; `citation_*` plus Dublin Core / PRISM) |
+
+The three Nature captures keep only the `<title>` and the `dc.*`, `prism.*`,
+`citation_*`, description, and `og:*` meta tags (`NatureDublinCoreMetadataTests`).
 
 Smoke tests (`PaperURLLiveSmokeTests.swift`) gated behind `RUBIEN_LIVE_TESTS=1`
 hit these live URLs and assert minimum fields (`title`, `authors`, `year`).

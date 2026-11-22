@@ -231,6 +231,126 @@ final class BrowserClipImportServiceTests: XCTestCase {
         XCTAssertEqual(try database.referenceCount(), 0)
     }
 
+    func testUnsignedNatureItemImportsOnConfirmationWithAuthenticatedPDF() async throws {
+        let database = try makeDatabase()
+        let articleURL = "https://www.nature.com/articles/d41586-026-03638-3"
+        let pdfURL = "https://www.nature.com/articles/d41586-026-03638-3.pdf"
+        let resolutionInputs = LockedValue<[String]>([])
+        let partial = unsignedNatureHighlight()
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { input, seed, fallback, _ in
+                var inputs = resolutionInputs.value
+                inputs.append(input)
+                resolutionInputs.value = inputs
+                return MetadataResolutionPipeline.noAuthorsOutcome(
+                    partialReference: partial,
+                    scrapedPDFURL: pdfURL,
+                    seed: seed,
+                    fallback: fallback
+                )
+            },
+            pdfDownloader: { _, _ in
+                XCTFail("The authenticated Chrome download should be preferred")
+                return "unexpected.pdf"
+            },
+            downloadedPDFImporter: { _ in "nature-research-highlight.pdf" }
+        )
+
+        // Nature's Research Highlight pages expose no citation_* tags, so the
+        // extension captures no citation metadata.
+        let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+            url: articleURL,
+            title: "\(partial.title) | Nature",
+            author: "Nature Briefing",
+            contentHTML: "<article>Research Highlight text</article>"
+        )))
+
+        XCTAssertEqual(resolutionInputs.value, [articleURL])
+        XCTAssertEqual(prepared.preview.kind, .paper)
+        XCTAssertEqual(prepared.preview.title, partial.title)
+        XCTAssertEqual(prepared.preview.authors, [])
+        XCTAssertEqual(prepared.preview.year, 2026)
+        XCTAssertEqual(prepared.preview.containerTitle, "Nature")
+        XCTAssertFalse(prepared.preview.willQueueForReview)
+        XCTAssertTrue(prepared.preview.willDownloadPDF)
+        XCTAssertEqual(prepared.preview.pdfDownloadURL, pdfURL)
+        XCTAssertEqual(
+            prepared.preview.message,
+            "Neither the page nor CrossRef lists authors. Confirm to import it without authors."
+        )
+        XCTAssertEqual(try database.referenceCount(), 0)
+
+        let downloadedURL = try makeBrowserDownload(
+            filename: "rubien-\(prepared.confirmationID.lowercased()).pdf",
+            contents: Data("%PDF-1.7\n".utf8)
+        )
+        let response = try await service.confirm(
+            prepared,
+            downloadedPDFPath: downloadedURL.path
+        )
+
+        XCTAssertEqual(response.result, .created)
+        XCTAssertEqual(response.pdfAttached, true)
+        XCTAssertEqual(try database.fetchPendingMetadataIntakes().count, 0)
+        let reference = try XCTUnwrap(try fetch(response.referenceID, from: database))
+        XCTAssertEqual(reference.title, partial.title)
+        XCTAssertEqual(reference.doi, partial.doi)
+        XCTAssertEqual(reference.journal, "Nature")
+        XCTAssertEqual(reference.pages, "565-565")
+        XCTAssertTrue(reference.authors.isEmpty, "The page byline is not citation metadata")
+        XCTAssertEqual(reference.verificationStatus, .verifiedManual)
+        XCTAssertEqual(reference.reviewedBy, "browser-clipper")
+        XCTAssertEqual(
+            try database.pdfFilename(for: try XCTUnwrap(reference.id)),
+            "nature-research-highlight.pdf"
+        )
+    }
+
+#if os(macOS)
+    func testUnsignedNatureItemFromChromePDFTabImportsWithItsPDF() async throws {
+        let database = try makeDatabase()
+        let token = UUID()
+        let browserURL = try makeBrowserDownload(
+            filename: "rubien-preview-\(token.uuidString.lowercased()).pdf",
+            contents: Data("%PDF-1.7\n".utf8)
+        )
+        let partial = unsignedNatureHighlight()
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { _, seed, fallback, _ in
+                MetadataResolutionPipeline.noAuthorsOutcome(
+                    partialReference: partial,
+                    scrapedPDFURL: "https://www.nature.com/articles/d41586-026-03638-3.pdf",
+                    seed: seed,
+                    fallback: fallback
+                )
+            }
+        )
+
+        let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+            url: "https://www.nature.com/articles/d41586-026-03638-3.pdf",
+            browserDownloadedFilePath: browserURL.path,
+            browserDownloadToken: token.uuidString.lowercased()
+        )))
+        XCTAssertFalse(prepared.preview.willQueueForReview)
+        XCTAssertFalse(prepared.preview.willDownloadPDF, "Chrome already staged the PDF")
+
+        let response = try await service.confirm(prepared)
+
+        XCTAssertEqual(response.result, .created)
+        XCTAssertEqual(response.pdfAttached, true)
+        XCTAssertEqual(try database.fetchPendingMetadataIntakes().count, 0)
+        let reference = try XCTUnwrap(try fetch(response.referenceID, from: database))
+        XCTAssertEqual(reference.verificationStatus, .verifiedManual)
+        let pdfPath = try XCTUnwrap(try database.pdfFilename(for: try XCTUnwrap(reference.id)))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: AppDatabase.pdfStorageURL.appendingPathComponent(pdfPath).path
+        ))
+        deleteStoredPDF(at: pdfPath)
+    }
+#endif
+
     func testOxfordAcademicPageOffersAssociatedAuthenticatedPDF() async throws {
         let database = try makeDatabase()
         let articleURL = "https://academic.oup.com/gji/article/239/3/1469/7760394"
@@ -1435,6 +1555,24 @@ final class BrowserClipImportServiceTests: XCTestCase {
             confirmationID: confirmationID,
             downloadedPDFPath: downloadedPDFPath,
             downloadPDF: downloadPDF
+        )
+    }
+
+    /// The record `PaperURLResolver` builds for Nature's unsigned Research
+    /// Highlight d41586-026-03638-3 (Dublin Core page + authorless CrossRef).
+    private func unsignedNatureHighlight() -> Reference {
+        Reference(
+            title: "Found: a protein that drives ageing without unleashing inflammation",
+            authors: [],
+            year: 2026,
+            journal: "Nature",
+            volume: "659",
+            issue: "8141",
+            pages: "565-565",
+            doi: "10.1038/d41586-026-03638-3",
+            url: "https://nature.com/articles/d41586-026-03638-3",
+            referenceType: .journalArticle,
+            metadataSource: .publisherCitationMeta
         )
     }
 
