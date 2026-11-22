@@ -1395,6 +1395,53 @@ final class PaperURLResolverTests: XCTestCase {
         XCTAssertEqual(outcome.reference.url, "https://nature.com/articles/foo")
     }
 
+    // MARK: - Entity-encoded publisher authors vs Crossref
+
+    /// Nature's `citation_author` values carry numeric entities and multi-word family
+    /// names. Mis-split names used to outnumber Crossref's list and win the author merge.
+    func testNatureEntityEncodedAuthorsMatchCrossref() async throws {
+        StubURLProtocol.stub(
+            "https://nature.com/articles/s41586-020-2649-2",
+            body: """
+            <html><head>
+            <meta name="citation_title" content="Array programming with NumPy"/>
+            <meta name="citation_author" content="Harris, Charles R."/>
+            <meta name="citation_author" content="van der Walt, St&#233;fan J."/>
+            <meta name="citation_author" content="van Kerkwijk, Marten H."/>
+            <meta name="citation_author" content="del R&#237;o, Jaime Fern&#225;ndez"/>
+            <meta name="citation_author" content="G&#233;rard-Marchant, Pierre"/>
+            <meta name="citation_journal_title" content="Nature"/>
+            <meta name="citation_publication_date" content="2020/09"/>
+            <meta name="citation_doi" content="10.1038/s41586-020-2649-2"/>
+            </head></html>
+            """
+        )
+        let crossrefAuthors = [
+            AuthorName(given: "Charles R.", family: "Harris"),
+            AuthorName(given: "Stéfan J.", family: "van der Walt"),
+            AuthorName(given: "Marten H.", family: "van Kerkwijk"),
+            AuthorName(given: "Jaime Fernández", family: "del Río"),
+            AuthorName(given: "Pierre", family: "Gérard-Marchant"),
+        ]
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://www.nature.com/articles/s41586-020-2649-2")!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                guard doi == "10.1038/s41586-020-2649-2" else { throw URLError(.badURL) }
+                return Reference(
+                    title: "Array programming with NumPy",
+                    authors: crossrefAuthors,
+                    year: 2020,
+                    journal: "Nature",
+                    doi: doi
+                )
+            }
+        )
+
+        XCTAssertEqual(outcome.reference.authors, crossrefAuthors)
+    }
+
     // MARK: - No-author safeguard
 
     func testNoAuthorsReturnsCandidate() async {

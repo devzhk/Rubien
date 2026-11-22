@@ -200,4 +200,58 @@ final class CitationMetaScraperParseTests: XCTestCase {
         XCTAssertEqual(result.authors.count, 3)
         XCTAssertEqual(result.authors.map(\.family), ["First", "Second", "Third"])
     }
+
+    // MARK: - Entity-encoded author names (Nature shape)
+
+    func testEntityEncodedFamilyGivenAuthorsStayWhole() {
+        // Nature writes accented letters as numeric references and names as
+        // "Family, Given", including multi-word family names. The entity's `;` and the
+        // comma must not split a name (s41586-020-2649-2, s41586-021-03819-2).
+        let html = """
+        <html><head>
+        <meta name="citation_title" content="Array programming with NumPy &#8211; a review &amp; more"/>
+        <meta name="citation_author" content="Millman, K. Jarrod"/>
+        <meta name="citation_author" content="van der Walt, St&#233;fan J."/>
+        <meta name="citation_author" content="van Kerkwijk, Marten H."/>
+        <meta name="citation_author" content="del R&#237;o, Jaime Fern&#225;ndez"/>
+        <meta name="citation_author" content="G&#233;rard-Marchant, Pierre"/>
+        <meta name="citation_author" content="&#381;&#237;dek, Augustin"/>
+        <meta name="citation_author" content="M&uuml;ller, J&ouml;rg"/>
+        <meta name="citation_author" content="Travis E. Oliphant"/>
+        </head></html>
+        """
+        let result = CitationMetaScraper.parse(
+            html: html,
+            baseURL: baseURL("https://www.nature.com/articles/s41586-020-2649-2")
+        )
+        XCTAssertEqual(result.title, "Array programming with NumPy – a review & more")
+        XCTAssertEqual(result.authors, [
+            AuthorName(given: "K. Jarrod", family: "Millman"),
+            AuthorName(given: "Stéfan J.", family: "van der Walt"),
+            AuthorName(given: "Marten H.", family: "van Kerkwijk"),
+            AuthorName(given: "Jaime Fernández", family: "del Río"),
+            AuthorName(given: "Pierre", family: "Gérard-Marchant"),
+            AuthorName(given: "Augustin", family: "Žídek"),
+            AuthorName(given: "Jörg", family: "Müller"),
+            AuthorName(given: "Travis E.", family: "Oliphant"),
+        ])
+    }
+
+    func testAuthorListsInsideCitationAuthorStillSplit() {
+        func authors(_ contents: [String]) -> [AuthorName] {
+            let tags = contents.map { "<meta name=\"citation_author\" content=\"\($0)\">" }
+            let html = "<html><head>\(tags.joined(separator: "\n"))</head></html>"
+            return CitationMetaScraper.parse(html: html, baseURL: baseURL("https://example.com/")).authors
+        }
+        let smith = AuthorName(given: "Jane", family: "Smith")
+        let doe = AuthorName(given: "John", family: "Doe")
+        let walt = AuthorName(given: "Stéfan", family: "van der Walt")
+
+        // A lone tag may carry the whole list.
+        XCTAssertEqual(authors(["Jane Smith, John Doe"]), [smith, doe])
+        XCTAssertEqual(authors(["Jane Smith and John Doe"]), [smith, doe])
+        // Explicit separators split even when the page repeats the tag.
+        XCTAssertEqual(authors(["Smith, Jane; van der Walt, St&#233;fan", "Doe, John"]), [smith, walt, doe])
+        XCTAssertEqual(authors(["Jane Smith and John Doe", "van der Walt, St&#233;fan"]), [smith, doe, walt])
+    }
 }

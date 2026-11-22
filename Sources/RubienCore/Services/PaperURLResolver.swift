@@ -733,9 +733,7 @@ public enum PaperURLResolver {
                 with: "",
                 options: .regularExpression
             )
-            let decoded = CitationMetaScraper.decodeHTMLEntities(withoutTags)
-                .replacingOccurrences(of: "&nbsp;", with: " ")
-            let normalized = decoded
+            let normalized = HTMLEntities.decode(withoutTags)
                 .components(separatedBy: .whitespacesAndNewlines)
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
@@ -1719,7 +1717,7 @@ internal extension PaperURLResolver {
         let unescaped = String(html[titleRange])
             .replacingOccurrences(of: #"\'"#, with: "'")
             .replacingOccurrences(of: #"\\"#, with: #"\"#)
-        let title = CitationMetaScraper.decodeHTMLEntities(unescaped)
+        let title = HTMLEntities.decode(unescaped)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return title.isEmpty ? nil : title
     }

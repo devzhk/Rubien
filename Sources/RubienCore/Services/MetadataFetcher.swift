@@ -528,7 +528,7 @@ public enum MetadataFetcher {
             fallbackMarker: "^"
         )
         text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-        text = CitationMetaScraper.decodeHTMLEntities(text)
+        text = HTMLEntities.decode(text)
         text = text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         text = text.replacingOccurrences(
             of: #"\s+([₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾])"#,
@@ -562,7 +562,7 @@ public enum MetadataFetcher {
         for match in matches.reversed() {
             guard match.numberOfRanges > 1 else { continue }
             let rawContent = result.substring(with: match.range(at: 1))
-            let content = CitationMetaScraper.decodeHTMLEntities(rawContent)
+            let content = HTMLEntities.decode(rawContent)
                 .components(separatedBy: .whitespacesAndNewlines)
                 .joined()
             guard !content.isEmpty else {

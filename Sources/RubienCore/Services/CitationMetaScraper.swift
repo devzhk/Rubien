@@ -45,10 +45,7 @@ public enum CitationMetaScraper {
         var genericDateYear: Int?
 
         // Multi-value tags
-        let authorValues = tags.filter { $0.name == "citation_author" }.map(\.content)
-        // citation_author is typically one name per tag, but some sites concatenate
-        // multiple authors with "and" in a single tag — parseList handles both shapes.
-        result.authors = authorValues.flatMap { AuthorName.parseList($0) }
+        result.authors = citationAuthors(tags.filter { $0.name == "citation_author" }.map(\.content))
 
         // Single-value tags
         for (name, content) in tags.map({ ($0.name, $0.content) }) {
@@ -86,6 +83,26 @@ public enum CitationMetaScraper {
     }
 
     // MARK: - Internals
+
+    /// `citation_author` holds one name per tag, written "Last, First" or "First Last".
+    /// On a page that repeats the tag, a value with one comma and no `;` or "and" is
+    /// therefore a single "Family, Given" name, even when the family name has several
+    /// words ("van der Walt, Stéfan J."); `AuthorName.parseList` would read those as
+    /// two names. A lone tag may carry the whole author list ("A Smith, B Jones"), so
+    /// it and every other shape keep `parseList`.
+    private static func citationAuthors(_ values: [String]) -> [AuthorName] {
+        values.flatMap { value -> [AuthorName] in
+            let isFamilyGivenName = values.count > 1
+                && value.filter({ $0 == "," }).count == 1
+                && !value.contains(";")
+                && value.range(of: " and ", options: .caseInsensitive) == nil
+            if isFamilyGivenName {
+                let author = AuthorName.parse(value.trimmingCharacters(in: .whitespacesAndNewlines))
+                if !author.family.isEmpty, !author.given.isEmpty { return [author] }
+            }
+            return AuthorName.parseList(value)
+        }
+    }
 
     private struct MetaTag {
         let name: String
@@ -130,7 +147,9 @@ public enum CitationMetaScraper {
             let attrs = parseAttributes(String(scope[attrsRange]))
             guard let name = attrs["name"]?.lowercased(),
                   let content = attrs["content"] else { return }
-            tags.append(MetaTag(name: name, content: decodeHTMLEntities(content)))
+            // Decode before any caller splits the value: an undecoded `&#233;` ends in
+            // `;`, which `AuthorName.parseList` reads as an author separator.
+            tags.append(MetaTag(name: name, content: HTMLEntities.decode(content)))
         }
         return tags
     }
@@ -188,14 +207,6 @@ public enum CitationMetaScraper {
             }
         }
         return result
-    }
-
-    internal static func decodeHTMLEntities(_ s: String) -> String {
-        s.replacingOccurrences(of: "&amp;", with: "&")
-         .replacingOccurrences(of: "&lt;", with: "<")
-         .replacingOccurrences(of: "&gt;", with: ">")
-         .replacingOccurrences(of: "&quot;", with: "\"")
-         .replacingOccurrences(of: "&#39;", with: "'")
     }
 
     private static func resolveAbsolute(_ rawURL: String, baseURL: URL) -> String? {
