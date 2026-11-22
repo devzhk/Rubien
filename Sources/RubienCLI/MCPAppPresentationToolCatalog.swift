@@ -179,7 +179,8 @@ enum MCPAppPresentationToolCatalog {
                 "kind": "web",
                 "url": rawURL,
                 "title": title,
-                "badge": RubienAppPresentationContract.externalCandidateBadge(for: rawURL),
+                "badge": RubienAppPresentationContract.externalCandidateBadge(
+                    for: rawURL, title: title),
             ]
             if let authors { card["authors"] = authors }
             if let year { card["year"] = year }

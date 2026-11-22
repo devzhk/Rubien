@@ -132,7 +132,7 @@ enum ChatPaperPresentation {
                 title: title,
                 authors: authors,
                 year: paper.year,
-                badge: RubienAppPresentationContract.externalCandidateBadge(for: url)
+                badge: RubienAppPresentationContract.externalCandidateBadge(for: url, title: title)
             )
         }
         return valid.isEmpty ? nil : ChatPaperGroup(items: valid)

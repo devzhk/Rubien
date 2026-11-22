@@ -127,6 +127,18 @@ final class ImportRouterTests: XCTestCase {
         XCTAssertEqual(route, .downloadImport)
     }
 
+    /// NeurIPS / PMLR supplements match the host but not the paper shape, so
+    /// they download as files instead of resolving as the paper itself.
+    func testVenueSupplementPDFsRouteToDownloadImport() {
+        for source in [
+            "https://proceedings.neurips.cc/paper_files/paper/2024/file/abc-Supplemental-Conference.pdf",
+            "https://papers.nips.cc/paper/2020/file/abc-Supplemental.pdf",
+            "https://proceedings.mlr.press/v200/foo23a/foo23a-supp.pdf",
+        ] {
+            XCTAssertEqual(ImportRouter.classify(source: source, probe: noPaths), .downloadImport, source)
+        }
+    }
+
     func testUnregisteredMarkdownURLRoutesToDownloadImport() {
         let route = ImportRouter.classify(source: "https://example.com/notes/paper.md", probe: noPaths)
         XCTAssertEqual(route, .downloadImport)

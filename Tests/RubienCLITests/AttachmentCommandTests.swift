@@ -1,5 +1,8 @@
 import Foundation
 import GRDB
+#if canImport(Network)
+import Network
+#endif
 import RubienCore
 import XCTest
 
@@ -135,6 +138,92 @@ final class AttachmentCommandTests: XCTestCase {
         XCTAssertEqual(try object(runCLI(["get", String(reference)]).stdout)["title"] as? String, "Primary paper")
     }
 
+    #if canImport(Network)
+    func testURLInputsDownloadNameAndReportPerInputErrors() throws {
+        let reference = try seed()
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("RubienPDFKitTests/Fixtures/PDFs/linear-3pages-text.pdf")
+        let pdf = try Data(contentsOf: fixture)
+        let server = try LoopbackFileServer(routes: [
+            "/papers/speediff_supp.pdf": .init(status: 200, contentType: "application/pdf", body: pdf),
+            "/papers/notes.md": .init(status: 200, contentType: "text/markdown", body: Data("# Supplement\n".utf8)),
+            "/papers/missing.pdf": .init(status: 404, contentType: "text/html", body: Data("Not found".utf8)),
+            "/papers/landing.pdf": .init(status: 200, contentType: "text/html",
+                                         body: Data("<html><body>Sign in</body></html>".utf8)),
+        ])
+        defer { server.stop() }
+        let supp = try XCTUnwrap(server.url("/papers/speediff_supp.pdf")).absoluteString
+        let notes = try XCTUnwrap(server.url("/papers/notes.md")).absoluteString
+        let missing = try XCTUnwrap(server.url("/papers/missing.pdf")).absoluteString
+        let landing = try XCTUnwrap(server.url("/papers/landing.pdf")).absoluteString
+        let temporaryBefore = Self.importTemporaryDirectories()
+
+        // One named URL input: added with the display name, URL basename kept.
+        let named = try runCLI(["attachment", "add", String(reference), "--name", "  SpeeDiff — Supplementary Material ",
+                                "--", supp])
+        XCTAssertEqual(named.exitCode, 0, named.stderr)
+        let namedResults = try array(named.stdout)
+        XCTAssertEqual(namedResults.count, 1)
+        XCTAssertEqual(Set(namedResults[0].keys), ["file", "outcome", "status"])
+        XCTAssertEqual(namedResults[0]["file"] as? String, supp)
+        XCTAssertEqual(namedResults[0]["outcome"] as? String, "added")
+        let attachment = try XCTUnwrap((namedResults[0]["status"] as? [String: Any])?["attachment"] as? [String: Any])
+        XCTAssertEqual(attachment["displayName"] as? String, "SpeeDiff — Supplementary Material")
+        XCTAssertEqual(attachment["originalFilename"] as? String, "speediff_supp.pdf")
+        XCTAssertEqual(attachment["kind"] as? String, "pdf")
+        XCTAssertEqual(attachment["byteCount"] as? Int, pdf.count)
+        let id = try XCTUnwrap(attachment["syncId"] as? String)
+
+        // Batch: repeat URL is a duplicate (name untouched), Markdown URL is
+        // added, and HTTP / payload failures are per-input errors.
+        let batch = try runCLI(["attachment", "add", String(reference), "--", supp, notes, missing, landing])
+        XCTAssertEqual(batch.exitCode, 0, batch.stderr)
+        let results = try array(batch.stdout)
+        XCTAssertEqual(results.compactMap { $0["file"] as? String }, [supp, notes, missing, landing])
+        XCTAssertEqual(results.compactMap { $0["outcome"] as? String }, ["duplicate", "added", "error", "error"])
+        let duplicate = try XCTUnwrap((results[0]["status"] as? [String: Any])?["attachment"] as? [String: Any])
+        XCTAssertEqual(duplicate["syncId"] as? String, id)
+        XCTAssertEqual(duplicate["displayName"] as? String, "SpeeDiff — Supplementary Material")
+        XCTAssertEqual(((results[1]["status"] as? [String: Any])?["attachment"] as? [String: Any])?["displayName"] as? String,
+                       "notes.md")
+        for failure in results[2...] {
+            XCTAssertEqual(Set(failure.keys), ["file", "outcome", "error"])
+            XCTAssertNotNil(failure["error"] as? String)
+        }
+        XCTAssertTrue((results[2]["error"] as? String)?.contains("404") == true, "\(results[2])")
+        XCTAssertEqual(try array(runCLI(["attachment", "list", String(reference)]).stdout).count, 2)
+        XCTAssertEqual(Self.importTemporaryDirectories().subtracting(temporaryBefore), [],
+                       "URL inputs must always remove their download directory")
+    }
+    #endif
+
+    func testNameRequiresExactlyOneInputAndValidName() throws {
+        let reference = try seed()
+        let first = testLibraryRoot.appendingPathComponent("a.md")
+        let second = testLibraryRoot.appendingPathComponent("b.md")
+        try Data("A".utf8).write(to: first)
+        try Data("B".utf8).write(to: second)
+        let two = try runCLI(["attachment", "add", String(reference), "--name", "Both", "--", first.path, second.path])
+        XCTAssertNotEqual(two.exitCode, 0)
+        XCTAssertTrue(two.stderr.contains("--name"), two.stderr)
+        for name in [" ", String(repeating: "x", count: 256)] {
+            let invalid = try runCLI(["attachment", "add", String(reference), "--name", name, "--", first.path])
+            XCTAssertNotEqual(invalid.exitCode, 0)
+            XCTAssertNotNil(try object(invalid.stderr)["error"])
+        }
+        XCTAssertTrue(try array(runCLI(["attachment", "list", String(reference)]).stdout).isEmpty)
+        let named = try runCLI(["attachment", "add", String(reference), "--name", "Local supplement", "--", first.path])
+        XCTAssertEqual(named.exitCode, 0, named.stderr)
+        let attachment = try XCTUnwrap((try array(named.stdout).first?["status"] as? [String: Any])?["attachment"] as? [String: Any])
+        XCTAssertEqual(attachment["displayName"] as? String, "Local supplement")
+        XCTAssertEqual(attachment["originalFilename"] as? String, "a.md")
+    }
+
+    private static func importTemporaryDirectories() -> Set<String> {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? []
+        return Set(names.filter { $0.hasPrefix("RubienImport-") })
+    }
+
     private func skipIfBinaryMissing() throws {
         guard FileManager.default.isExecutableFile(atPath: cliBinaryPath) else {
             throw XCTSkip("CLI binary not found at \(cliBinaryPath). Run swift build first.")
@@ -182,3 +271,80 @@ final class AttachmentCommandTests: XCTestCase {
         )
     }
 }
+
+#if canImport(Network)
+/// Minimal loopback HTTP/1.1 file server for CLI download tests. The CLI runs
+/// as a separate process, so URLProtocol stubs cannot intercept its requests.
+/// One response per connection (`Connection: close`).
+private final class LoopbackFileServer {
+    struct Route {
+        let status: Int
+        let contentType: String
+        let body: Data
+    }
+
+    private let listener: NWListener
+    private let routes: [String: Route]
+    private let queue = DispatchQueue(label: "com.rubien.tests.attachment-loopback-server")
+
+    init(routes: [String: Route]) throws {
+        self.routes = routes
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready, .failed, .cancelled: ready.signal()
+            default: break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in self?.serve(connection) }
+        listener.start(queue: queue)
+        guard ready.wait(timeout: .now() + 10) == .success, listener.port != nil else {
+            listener.cancel()
+            throw XCTSkip("Loopback listener did not start")
+        }
+    }
+
+    func url(_ path: String) -> URL? {
+        guard let port = listener.port else { return nil }
+        return URL(string: "http://127.0.0.1:\(port.rawValue)\(path)")
+    }
+
+    func stop() { listener.cancel() }
+
+    private func serve(_ connection: NWConnection) {
+        connection.start(queue: queue)
+        receiveHeaders(on: connection, buffer: Data())
+    }
+
+    private func receiveHeaders(on connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self, error == nil else { connection.cancel(); return }
+            var received = buffer
+            if let data { received.append(data) }
+            if received.range(of: Data("\r\n\r\n".utf8)) == nil, !isComplete {
+                self.receiveHeaders(on: connection, buffer: received)
+                return
+            }
+            self.respond(on: connection, request: String(decoding: received, as: UTF8.self))
+        }
+    }
+
+    private func respond(on connection: NWConnection, request: String) {
+        let requestLine = request.split(separator: "\r\n", maxSplits: 1).first ?? ""
+        let parts = requestLine.split(separator: " ")
+        let path = parts.count > 1 ? String(parts[1]) : "/"
+        let route = routes[path] ?? Route(status: 404, contentType: "text/plain", body: Data("Not found".utf8))
+        let head = "HTTP/1.1 \(route.status) Status\r\n"
+            + "Content-Type: \(route.contentType)\r\n"
+            + "Content-Length: \(route.body.count)\r\n"
+            + "Connection: close\r\n\r\n"
+        var payload = Data(head.utf8)
+        payload.append(route.body)
+        connection.send(content: payload, contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { _ in connection.cancel() })
+    }
+}
+#endif

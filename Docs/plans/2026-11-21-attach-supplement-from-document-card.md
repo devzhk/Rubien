@@ -230,7 +230,9 @@ parity applies:
   - `files` may contain URLs; a new optional `name` is `string, 1…255`;
     descriptions are updated.
   - Bump npm `MIN_CLI_BUILD` to the shipping build, because an older CLI would
-    treat a URL as a path.
+    treat a URL as a path. Do this in the release-prep commit together with
+    `BUILD.txt` and the stub CLI fixture, as 0.8.0 did (`7c953162`). Bumping it
+    earlier fails the npm native-parity tests against the current build.
 - Users can also say "attach the supplement to this paper". The agent then uses
   the existing write-approval path rather than the sheet.
 - The `supplementOf` field changes only the app-private presentation tool

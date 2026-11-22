@@ -794,14 +794,22 @@ internal enum KnownPaperHost: CaseIterable {
             return nil
         case "papers.nips.cc":
             if matches(path, pattern: #"^/paper/\d+/hash/.+\.html$"#) { return .neurIPS }
+            // `<hash>-Supplemental….pdf` sits beside the paper PDF but is the
+            // supplement, not the paper: leave it unclassified so it routes as a
+            // downloadable file instead of resolving as the paper itself.
+            if matches(path, pattern: #"^/paper/\d+/file/[^/]+-Supplemental[^/]*\.pdf$"#) { return nil }
             if matches(path, pattern: #"^/paper/\d+/file/.+\.pdf$"#) { return .neurIPS }
             return nil
         case "proceedings.neurips.cc":
             if matches(path, pattern: #"^/paper_files/paper/\d+/hash/.+\.html$"#) { return .neurIPSProceedings }
+            // Supplement PDF (`<hash>-Supplemental-Conference.pdf`); see above.
+            if matches(path, pattern: #"^/paper_files/paper/\d+/file/[^/]+-Supplemental[^/]*\.pdf$"#) { return nil }
             if matches(path, pattern: #"^/paper_files/paper/\d+/file/.+\.pdf$"#) { return .neurIPSProceedings }
             return nil
         case "proceedings.mlr.press":
             if matches(path, pattern: #"^/v\d+/[^/]+\.html$"#) { return .pmlr }
+            // Supplement PDF (`/v<n>/<id>/<id>-supp.pdf`) is not the paper.
+            if matches(path, pattern: #"^/v\d+/[^/]+/[^/]+-supp\.pdf$"#) { return nil }
             if matches(path, pattern: #"^/v\d+/[^/]+/[^/]+\.pdf$"#) { return .pmlr }
             return nil
         case "ieeexplore.ieee.org":

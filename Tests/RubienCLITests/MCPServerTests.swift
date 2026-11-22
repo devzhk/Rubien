@@ -681,6 +681,43 @@ final class MCPServerTests: XCTestCase {
         XCTAssertFalse(listed.stdout.contains("Must Not Be Created"))
     }
 
+    func testAttachmentAddAdvertisesOptionalNameAndForwardsItBeforeSeparator() throws {
+        try skipIfBinaryMissing()
+        let listed = try runMCP([req(id: 1, method: "tools/list")], readOnly: false)
+        let tools = try XCTUnwrap((response(listed, id: 1)?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let add = try XCTUnwrap(tools.first { $0["name"] as? String == "rubien_attachment_add" })
+        let schema = try XCTUnwrap(add["inputSchema"] as? [String: Any])
+        let name = try XCTUnwrap((schema["properties"] as? [String: Any])?["name"] as? [String: Any])
+        XCTAssertEqual(name["type"] as? String, "string")
+        XCTAssertEqual(name["minLength"] as? Int, 1)
+        XCTAssertEqual(name["maxLength"] as? Int, 255)
+        XCTAssertEqual(Set(schema["required"] as? [String] ?? []), ["referenceId", "files"])
+        XCTAssertTrue((add["description"] as? String)?.contains("HTTP(S) URL") == true)
+
+        let reference = try seedTitle("Attachment parent")
+        let first = testLibraryRoot.appendingPathComponent("--looks-like-a-flag.md")
+        let second = testLibraryRoot.appendingPathComponent("second.md")
+        try Data("first".utf8).write(to: first)
+        try Data("second".utf8).write(to: second)
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_attachment_add",
+                     arguments: ["referenceId": reference, "files": [first.path], "name": "Named supplement"]),
+            toolCall(id: 2, name: "rubien_attachment_add",
+                     arguments: ["referenceId": reference, "files": [first.path, second.path], "name": "Both"]),
+            toolCall(id: 3, name: "rubien_attachment_add",
+                     arguments: ["referenceId": reference, "files": [second.path], "name": ""]),
+        ], readOnly: false)
+        let added = try XCTUnwrap(try successfulToolJSON(responses, id: 1) as? [[String: Any]])
+        let attachment = try XCTUnwrap((added.first?["status"] as? [String: Any])?["attachment"] as? [String: Any])
+        XCTAssertEqual(added.first?["outcome"] as? String, "added")
+        XCTAssertEqual(added.first?["file"] as? String, first.path)
+        XCTAssertEqual(attachment["displayName"] as? String, "Named supplement")
+        for id in 2...3 {
+            let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, true, "request \(id): \(result)")
+        }
+    }
+
     func testFullModeExecutesWriteTool() throws {
         try skipIfBinaryMissing()
         let responses = try runMCP([

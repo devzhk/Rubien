@@ -518,3 +518,45 @@ describe("search scopes", () => {
     await client.close();
   });
 });
+
+describe("rubien_attachment_add argv", () => {
+  it("forwards files after the -- separator with the 300s download budget", async () => {
+    const client = await connectedClient();
+    await client.callTool({
+      name: "rubien_attachment_add",
+      arguments: { referenceId: 7, files: ["/tmp/a.pdf", "https://example.com/supp.pdf"] },
+    });
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith(
+      ["attachment", "add", "7", "--", "/tmp/a.pdf", "https://example.com/supp.pdf"],
+      { timeoutMs: 300_000 },
+    );
+    await client.close();
+  });
+
+  it("places --name before the -- separator", async () => {
+    const client = await connectedClient();
+    await client.callTool({
+      name: "rubien_attachment_add",
+      arguments: { referenceId: 7, files: ["https://example.com/supp.pdf"], name: "Supplementary Material" },
+    });
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith(
+      ["attachment", "add", "7", "--name", "Supplementary Material", "--", "https://example.com/supp.pdf"],
+      { timeoutMs: 300_000 },
+    );
+    await client.close();
+  });
+
+  it("rejects an empty or overlong name before launching the CLI", async () => {
+    const client = await connectedClient();
+    vi.mocked(runCliAsTool).mockClear();
+    for (const name of ["", "x".repeat(256)]) {
+      const result = await client.callTool({
+        name: "rubien_attachment_add",
+        arguments: { referenceId: 7, files: ["/tmp/a.pdf"], name },
+      });
+      expect(result.isError).toBe(true);
+    }
+    expect(vi.mocked(runCliAsTool)).not.toHaveBeenCalled();
+    await client.close();
+  });
+});

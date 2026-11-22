@@ -148,6 +148,21 @@ final class KnownPaperHostClassifyTests: XCTestCase {
         XCTAssertEqual(classify("https://proceedings.mlr.press/v200/foo23a/foo23a.pdf"), .pmlr)
     }
 
+    // Supplements sit beside paper PDFs but are not the paper: they stay
+    // unclassified so they route as downloadable files, not resolver inputs.
+    func testNeurIPSSupplementalPDFsAreNotPaperURLs() {
+        XCTAssertNil(classify("https://proceedings.neurips.cc/paper_files/paper/2024/file/abc-Supplemental-Conference.pdf"))
+        XCTAssertNil(classify("https://proceedings.neurips.cc/paper_files/paper/2023/file/abc-Supplemental-Datasets_and_Benchmarks.pdf"))
+        XCTAssertNil(classify("https://papers.nips.cc/paper/2020/file/abc-Supplemental.pdf"))
+        XCTAssertNil(classify("https://papers.nips.cc/paper_files/paper/2020/file/abc-Supplemental.pdf"))
+    }
+    func testPMLRSupplementPDFIsNotAPaperURL() {
+        XCTAssertNil(classify("https://proceedings.mlr.press/v200/foo23a/foo23a-supp.pdf"))
+    }
+    func testCVFSupplementalPDFIsNotAPaperURL() {
+        XCTAssertNil(classify("https://openaccess.thecvf.com/content/CVPR2026/supplemental/Foo_CVPR_2026_supplemental.pdf"))
+    }
+
     // IEEE
     func testIEEEDocument() {
         XCTAssertEqual(classify("https://ieeexplore.ieee.org/document/1234567"), .ieeeXplore)

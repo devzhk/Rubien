@@ -62,6 +62,24 @@ final class AddReferenceInputRouterTests: XCTestCase {
         XCTAssertEqual(AddReferenceInputRouter.classify(markdown, probe: noPaths), .file(markdown))
     }
 
+    func testVenueSupplementPDFsRouteToFileImport() {
+        for input in [
+            "https://proceedings.neurips.cc/paper_files/paper/2024/file/abc-Supplemental-Conference.pdf",
+            "https://papers.nips.cc/paper/2020/file/abc-Supplemental.pdf",
+            "https://proceedings.mlr.press/v200/foo23a/foo23a-supp.pdf",
+            "https://openaccess.thecvf.com/content/CVPR2026/supplemental/Foo_CVPR_2026_supplemental.pdf",
+        ] {
+            XCTAssertEqual(AddReferenceInputRouter.classify(input, probe: noPaths), .file(input), input)
+        }
+        // The neighboring paper PDFs still resolve as papers.
+        for input in [
+            "https://proceedings.neurips.cc/paper_files/paper/2024/file/abc-Paper-Conference.pdf",
+            "https://proceedings.mlr.press/v200/foo23a/foo23a.pdf",
+        ] {
+            XCTAssertEqual(AddReferenceInputRouter.classify(input, probe: noPaths), .metadata(input), input)
+        }
+    }
+
     func testArxivPDFURLRoutesToFileImport() {
         let input = "https://arxiv.org/pdf/2501.01234.pdf"
         XCTAssertEqual(AddReferenceInputRouter.classify(input, probe: noPaths), .file(input))

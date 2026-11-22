@@ -1425,6 +1425,8 @@ reference are skipped; original bytes and filenames are retained after renaming.
 ```sh
 rubien-cli attachment list 42
 rubien-cli attachment add 42 -- /path/supplement.pdf /path/notes.md
+rubien-cli attachment add 42 --name "CVPR 2026 Supplementary Material" -- \
+  https://openaccess.thecvf.com/content/CVPR2026/supplemental/Foo_CVPR_2026_supplemental.pdf
 rubien-cli attachment status <attachment-uuid>
 rubien-cli attachment retry <attachment-uuid>
 rubien-cli attachment read <attachment-uuid> --pages 2-4 --max-chars 50000
@@ -1449,10 +1451,25 @@ one status object. Each contains:
   sync remains opt-in for Development verification (`RUBIEN_ENABLE_ATTACHMENT_SYNC=1`).
 - `pendingUpload`: retained upload intent, **not** a successful cloud upload.
 
-`add` returns one result per file: `{file, outcome, status?, error?}`, where outcome
-is `added`, `duplicate`, or `error`. Batch completion exits successfully even when
-individual files fail; inspect every result. Other command failures return nonzero
-and a JSON error on stderr. An empty batch is a usage error.
+`add` returns one result per input: `{file, outcome, status?, error?}`, where `file`
+echoes the input and outcome is `added`, `duplicate`, or `error`. Batch completion
+exits successfully even when individual inputs fail; inspect every result. Other
+command failures return nonzero and a JSON error on stderr. An empty batch is a
+usage error.
+
+Each input is a local path or an explicit `http://` / `https://` URL. URLs must name
+a direct `.pdf`, `.md`, or `.markdown` file; they download through the same checks as
+`create` (PDF content type and magic bytes, Markdown content type and UTF-8, GitHub
+`/blob/` → `raw=1`) into a temporary directory that is removed afterwards. HTTP
+errors and non-PDF payloads (for example an HTML sign-in page served at a `.pdf`
+URL) are per-input `error` results. Duplicate detection runs after the download, so
+a repeated URL reports `duplicate`. `originalFilename` is the URL's basename.
+
+`--name <display>` sets the display name (trimmed; 1–255 characters, no NUL) and
+requires exactly one input; with more inputs it is a usage error, and an invalid
+name fails before any download. Without it the display name is the filename. A
+`duplicate` result returns the existing attachment unchanged, including its name.
+`.markdown` files are accepted as Markdown.
 
 `read` returns the attachment UUID and source plus the existing reading shapes:
 PDF has `pageCount`, `selection`, `pages`, `truncated`, and `hasTextLayer`; Markdown
@@ -1471,11 +1488,15 @@ closes its reader. It never deletes the parent reference.
 Native and npm MCP expose matching `rubien_attachment_list`, `rubien_attachment_add`,
 `rubien_attachment_status`, `rubien_attachment_retry`, `rubien_attachment_read`, `rubien_attachment_export`,
 `rubien_attachment_rename`, and `rubien_attachment_remove` tools. List/add use
-`referenceId`; other tools use the attachment UUID in `id`. Add accepts `files`;
-read accepts `pages`, `start`, `maxChars`; rename accepts `name`; export accepts
-`output`. Add, retry, export, rename, and remove require the existing write approval path;
-remove is marked destructive. The read-only server exposes only list/status/read.
-These tools require a CLI build containing the attachment commands.
+`referenceId`; other tools use the attachment UUID in `id`. Add accepts `files`
+(local paths or HTTP(S) file URLs) and an optional `name` (string, 1–255 characters,
+forwarded as `--name` and requiring exactly one entry in `files`); add allows 300 s
+for downloads. Read accepts `pages`, `start`, `maxChars`; rename accepts `name`; export
+accepts `output`. Add, retry, export, rename, and remove require the existing write
+approval path; remove is marked destructive. The read-only server exposes only
+list/status/read. These tools require a CLI build containing the attachment
+commands; URL inputs and `name` need a CLI build that includes them (the npm
+server's `MIN_CLI_BUILD` is raised to that build when it ships).
 
 `attachment retry` resets backoff and retries recovery lookups for that attachment
 in the active account scope. It does not enable sync or recreate a missing,

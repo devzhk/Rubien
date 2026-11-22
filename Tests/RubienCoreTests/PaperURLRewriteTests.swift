@@ -44,6 +44,14 @@ final class PaperURLRewriteTests: XCTestCase {
                        "https://proceedings.neurips.cc/paper_files/paper/2024/hash/abc-Abstract-Datasets_and_Benchmarks_Track.html")
     }
 
+    /// Supplement PDFs are excluded from the registry, so no paper-landing
+    /// rewrite is ever attempted for them.
+    func testSupplementPDFsHaveNoLandingRewrite() {
+        XCTAssertNil(rewrite("https://proceedings.neurips.cc/paper_files/paper/2024/file/abc-Supplemental-Conference.pdf"))
+        XCTAssertNil(rewrite("https://papers.nips.cc/paper/2020/file/abc-Supplemental.pdf"))
+        XCTAssertNil(rewrite("https://proceedings.mlr.press/v200/foo23a/foo23a-supp.pdf"))
+    }
+
     func testPMLRPDFRewrite() {
         XCTAssertEqual(rewrite("https://proceedings.mlr.press/v200/foo23a/foo23a.pdf"),
                        "https://proceedings.mlr.press/v200/foo23a.html")

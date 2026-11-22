@@ -25,8 +25,10 @@ public enum RubienAppPresentationContract {
     /// External cards are still unverified candidates, but their badge should
     /// reflect the intake path Rubien will use when the user chooses Add. This
     /// keeps a recognized paper URL from looking (and later behaving) like a
-    /// generic web clip.
-    public static func externalCandidateBadge(for rawURL: String) -> String {
+    /// generic web clip. An attachable file (PDF/Markdown) that looks like a
+    /// paper's supplementary material (by URL shape or `title`) is badged
+    /// "Supplement candidate" so it is not mistaken for a standalone paper.
+    public static func externalCandidateBadge(for rawURL: String, title: String? = nil) -> String {
         switch AddReferenceInputRouter.classify(rawURL, probe: { _ in
             ImportRouter.PathProbe(exists: false, isDirectory: false)
         }) {
@@ -34,6 +36,9 @@ public enum RubienAppPresentationContract {
             return "Paper candidate"
         case .file:
             guard let url = URL(string: rawURL) else { return "Document candidate" }
+            if SupplementaryMaterialURL.looksSupplementary(url: url, title: title) {
+                return "Supplement candidate"
+            }
             return url.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
                 ? "PDF candidate"
                 : "Document candidate"
