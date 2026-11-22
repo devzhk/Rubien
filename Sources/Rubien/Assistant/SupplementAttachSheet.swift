@@ -20,7 +20,9 @@ struct SupplementAttachSheet: View {
     @FocusState private var searchFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        // Matches AddReferenceSourceSheet, which "Continue…" opens next:
+        // 16 pt rhythm, 20 pt padding, 520 pt width, SL button styles.
+        VStack(alignment: .leading, spacing: 16) {
             header
             if case .finished = model.phase {
                 result
@@ -34,7 +36,7 @@ struct SupplementAttachSheet: View {
             buttons
         }
         .padding(20)
-        .frame(width: 500)
+        .frame(width: 520, alignment: .leading)
         .onChange(of: model.searchQuery) { _, _ in scheduleSearch() }
         .onDisappear {
             searchTask?.cancel()
@@ -52,7 +54,7 @@ struct SupplementAttachSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             if !model.subtitle.isEmpty {
                 Text(model.subtitle)
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
@@ -97,19 +99,11 @@ struct SupplementAttachSheet: View {
                 .focused($searchFocused)
                 .padding(.leading, 24)
             if !model.searchResults.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 0) {
                     ForEach(model.searchResults) { target in
-                        Button {
+                        SearchResultRow(title: target.title) {
                             model.selectSearchResult(target)
-                        } label: {
-                            Text(target.title)
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.vertical, 3)
-                                .padding(.horizontal, 6)
-                                .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.leading, 24)
@@ -139,16 +133,19 @@ struct SupplementAttachSheet: View {
         case .downloading:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Downloading…").foregroundStyle(.secondary)
+                Text("Downloading…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         case .failed(let message):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text(message)
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
-                Spacer()
+                Spacer(minLength: 0)
                 Button("Try again") { model.retry() }
+                    .buttonStyle(SLSecondaryButtonStyle())
                     .disabled(!model.canPerformPrimary)
             }
         case .choosing, .finished:
@@ -158,24 +155,32 @@ struct SupplementAttachSheet: View {
 
     private var result: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(model.resultMessage ?? "", systemImage: "checkmark.circle.fill")
-                .font(.body.weight(.medium))
+            Label {
+                Text(model.resultMessage ?? "")
+                    .font(.body.weight(.medium))
+            } icon: {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
             if let message = model.openErrorMessage {
-                Text(message)
-                    .font(.caption)
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
                     .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
     private var buttons: some View {
-        HStack {
+        HStack(spacing: 10) {
             Spacer()
             if case .finished = model.phase {
                 Button("Open") {
                     Task { await model.openAttachment() }
                 }
+                .buttonStyle(SLSecondaryButtonStyle())
                 Button("Done") { onDismiss() }
+                    .buttonStyle(SLPrimaryButtonStyle())
                     .keyboardShortcut(.defaultAction)
             } else {
                 Button("Cancel") {
@@ -185,12 +190,14 @@ struct SupplementAttachSheet: View {
                         onDismiss()
                     }
                 }
+                .buttonStyle(SLSecondaryButtonStyle())
                 .keyboardShortcut(.cancelAction)
                 Button(model.primaryButtonTitle) {
                     if case .continueToNewReference(let url) = model.performPrimary() {
                         onContinueToNewReference(url)
                     }
                 }
+                .buttonStyle(SLPrimaryButtonStyle())
                 .keyboardShortcut(.defaultAction)
                 .disabled(!model.canPerformPrimary)
             }
@@ -238,6 +245,31 @@ struct SupplementAttachSheet: View {
             guard !Task.isCancelled else { return }
             await model.runSearch()
         }
+    }
+}
+
+/// One library search result: a full-width row with the app's light hover fill.
+private struct SearchResultRow: View {
+    let title: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.callout)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(isHovered ? 0.07 : 0)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(title)
     }
 }
 #endif

@@ -15,7 +15,7 @@ enum MCPAppPresentationToolCatalog {
 
     private static let presentDocumentCardsTool = MCPTool(
         name: toolName,
-        description: "Present every openable document intentionally referenced in this response as clickable Rubien cards. Call this tool exactly once with up to \(maximumItemCount) saved library documents and external document URLs the user should be able to open. Include authors and year for external documents when known; Rubien classifies each URL as a paper, PDF/document, or web candidate. When an external file is supplementary material (supplement, appendix, supporting information) of a saved library document, set supplementOf to that document's referenceId; the user confirms before anything is attached. Keep explanations and reasons in response prose, never in the arguments.",
+        description: "Present every openable document intentionally referenced in this response as clickable Rubien cards. Call this tool exactly once with up to \(maximumItemCount) saved library documents and external document URLs the user should be able to open. Include authors and year for external documents when known; Rubien classifies each URL as a paper, PDF/document, or web candidate. When an external file is supplementary material (supplement, appendix, supporting information) of a saved library document, set supplementOf to that document's referenceId; the user confirms before anything is attached. Keep explanations and reasons in response prose, never in the arguments. Rubien renders the returned items itself: their kind and badge fields are internal presentation data, so never describe or comment on them in your reply.",
         inputSchema: [
             "type": "object",
             "properties": [
