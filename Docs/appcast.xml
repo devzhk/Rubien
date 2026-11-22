@@ -904,5 +904,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.10</title>
+            <description sparkle:format="plain-text"><![CDATA[• Clipped articles from MathJax sites, such as Scientific Spaces, now show equation numbers on the right and line up aligned equations like the original page. Articles you've already clipped are fixed without clipping again.
+• Stretchy symbols in clipped math, such as underbraces and long arrows, are no longer flattened.
+• New clips in the app and the browser extension keep more math intact: aligned rows, spacing, fraction slashes, and math in headings.]]></description>
+            <pubDate>Sun, 22 Nov 2026 21:22:48 +0000</pubDate>
+            <sparkle:version>61</sparkle:version>
+            <sparkle:shortVersionString>0.8.10</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.10/Rubien-0.8.10.dmg"
+                sparkle:edSignature="pQ9XDZoV9HVcegcMhsp12GK0FTMW3nQj9Ytcv0MfxATBmgNAv7Cl1hFAVs3stPG7epnKmTYPzJ8JLEzEFidrBw=="
+                length="19388735"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
