@@ -154,8 +154,15 @@ enum CreateReferenceSource {
     private static func runResolver(source: String, downloadPdf: Bool) async throws {
         // Fetch → verify → save → optionally attach the OA PDF. The router has
         // already applied the default-on policy and any explicit opt-out.
+        // The command is the user's confirmation of what it fetches, so an
+        // unsigned publisher item (no authors on the page or in CrossRef) is
+        // saved like a bare DOI for the same work, matching the browser
+        // popup's confirm-to-import path.
         do {
-            let (fetched, scrapedPDFURL) = try await MetadataFetcher.fetchWithScrapedPDFURL(from: source)
+            let (fetched, scrapedPDFURL) = try await MetadataFetcher.fetchWithScrapedPDFURL(
+                from: source,
+                acceptingAuthorlessPaperURL: true
+            )
             var ref = MetadataVerifier.manuallyVerified(fetched, reviewedBy: "cli-source")
             let saveResult = try AppDatabase.shared.saveReference(&ref)
             let pdf = downloadPdf ? await attemptPDFDownload(for: ref, pdfURLOverride: scrapedPDFURL) : nil

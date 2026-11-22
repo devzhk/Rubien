@@ -407,6 +407,22 @@ struct BrowserClipImportService {
         } else {
             resolution = initialResolution
         }
+        // An unsigned publisher item (no authors on the page or in CrossRef)
+        // is otherwise complete. The popup shows the record and warns that it
+        // has no authors, so the user's confirmation is the review: save it
+        // as manually verified, with its publisher PDF, instead of queueing.
+        if !isVerified(resolution.result),
+           let authorless = resolution.authorlessRecord {
+            return .metadata(
+                input: input,
+                result: .verified(MetadataResolutionPipeline.manuallyConfirmedEnvelope(
+                    for: authorless,
+                    reviewedBy: "browser-clipper"
+                )),
+                preferredPDFURL: authorless.pdfURL ?? capturedPublisherPDFURL,
+                browserPDFSource: browserPDFSource
+            )
+        }
         let enrichedResult = enrichCapturedFallback(
             in: resolution.result,
             capturedFallback: capturedFallback
@@ -1004,7 +1020,9 @@ struct BrowserClipImportService {
         case .verified(let envelope):
             reference = envelope.reference
             willQueueForReview = false
-            message = paperPDFAlreadyStaged
+            message = kind == .paper && envelope.reference.authors.isEmpty
+                ? "Neither the page nor CrossRef lists authors. Confirm to import it without authors."
+                : paperPDFAlreadyStaged
                 ? "Bibliographic metadata and the authenticated PDF are ready to import."
                 : kind == .pdf
                 ? "PDF metadata is ready to import."

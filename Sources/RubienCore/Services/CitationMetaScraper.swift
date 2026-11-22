@@ -20,9 +20,13 @@ public struct CitationMetaResult: Sendable, Equatable {
     public var pdfURL: String?
     public var publisher: String?
     public var arxivID: String?
+    /// True when the page had no `citation_title`, so the fields came from
+    /// its Dublin Core / PRISM tags instead (see `CitationMetaScraper.parse`).
+    public var usedDublinCoreFallback: Bool
 
     public init() {
         self.authors = []
+        self.usedDublinCoreFallback = false
     }
 }
 
@@ -79,7 +83,71 @@ public enum CitationMetaScraper {
         }
         result.year = explicitYear ?? publicationDateYear ?? genericDateYear
 
+        if result.title?.rubien_nilIfBlank == nil {
+            applyDublinCoreFallback(tags, to: &result)
+        }
+
         return result
+    }
+
+    // MARK: - Dublin Core / PRISM fallback
+
+    /// Some publisher pages describe the work only with Dublin Core and PRISM
+    /// tags (Nature's news and Research Highlight pages, for example). Read
+    /// them only when the page has no `citation_title` and the tags name a
+    /// DOI: pages with Highwire `citation_*` metadata parse exactly as before,
+    /// and the DOI lets CrossRef normalize the record. Values already set from
+    /// `citation_*` tags are kept.
+    private static func applyDublinCoreFallback(
+        _ tags: [MetaTag],
+        to result: inout CitationMetaResult
+    ) {
+        func values(_ name: String) -> [String] {
+            tags.filter { $0.name == name }
+                .compactMap { $0.content.trimmingCharacters(in: .whitespacesAndNewlines).rubien_nilIfBlank }
+        }
+        func first(_ names: String...) -> String? {
+            names.lazy.compactMap { values($0).first }.first
+        }
+
+        guard let title = first("dc.title"),
+              let doi = (values("prism.doi") + values("dc.identifier"))
+                .lazy
+                .compactMap(doiFromIdentifier)
+                .first else {
+            return
+        }
+
+        result.usedDublinCoreFallback = true
+        result.title = title
+        result.doi = result.doi?.rubien_nilIfBlank ?? doi
+        if result.authors.isEmpty {
+            result.authors = values("dc.creator").flatMap { AuthorName.parseList($0) }
+        }
+        result.journal = result.journal ?? first("prism.publicationname")
+        result.volume = result.volume ?? first("prism.volume")
+        result.issue = result.issue ?? first("prism.number")
+        result.firstPage = result.firstPage ?? first("prism.startingpage")
+        result.lastPage = result.lastPage ?? first("prism.endingpage")
+        result.publisher = result.publisher ?? first("dc.publisher")
+        result.issn = result.issn ?? first("prism.issn", "prism.eissn")
+        result.abstract = result.abstract ?? first("dc.description")
+        if result.year == nil {
+            result.year = first("prism.publicationdate", "dc.date")
+                .flatMap { MetadataResolution.extractYear(fromMetadataText: $0) }
+        }
+    }
+
+    /// Accepts `doi:10.x/y`, `https://doi.org/10.x/y`, or a bare `10.x/y`;
+    /// other identifier forms (ISSNs, article URLs) yield nil.
+    private static func doiFromIdentifier(_ value: String) -> String? {
+        let lowered = value.lowercased()
+        guard lowered.hasPrefix("doi:")
+            || lowered.hasPrefix("10.")
+            || lowered.contains("doi.org/") else {
+            return nil
+        }
+        return MetadataFetcher.cleanDOI(value)
     }
 
     // MARK: - Internals

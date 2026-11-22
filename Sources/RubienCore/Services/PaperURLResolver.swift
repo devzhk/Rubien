@@ -526,7 +526,8 @@ public enum PaperURLResolver {
     ) async throws -> (Reference, String?) {
         let meta = try await CitationMetaScraper.fetch(landingURL, session: session)
 
-        // Strong evidence gate: require citation_title + at least 1 other.
+        // Strong evidence gate: require a title (citation_title, or dc.title
+        // with a Dublin Core / PRISM DOI) + at least 1 other field.
         guard let title = meta.title?.trimmingCharacters(in: .whitespacesAndNewlines),
               !title.isEmpty else {
             throw ResolveError.insufficientMetadata
@@ -587,7 +588,29 @@ public enum PaperURLResolver {
             issn: meta.issn,
             eventTitle: (referenceType == .conferencePaper) ? meta.conferenceTitle : nil
         )
-        return (ref, meta.pdfURL)
+        // Nature's Dublin Core-only pages (news, Research Highlights) link
+        // their PDF only for signed-in readers; the registered
+        // `/articles/<id>.pdf` form is the same file.
+        let pdfURL = meta.pdfURL ?? (
+            host == .nature && meta.usedDublinCoreFallback
+                ? natureArticlePDFURL(for: landingURL)?.absoluteString
+                : nil
+        )
+        return (ref, pdfURL)
+    }
+
+    /// `https://www.nature.com/articles/<id>.pdf` for a single-segment Nature
+    /// article landing path; nil for any other path shape.
+    static func natureArticlePDFURL(for landingURL: URL) -> URL? {
+        let segments = landingURL.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard segments.count == 2,
+              segments[0] == "articles",
+              let articleID = segments.last.map(String.init),
+              !articleID.lowercased().hasSuffix(".pdf"),
+              articleID.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return URL(string: "https://www.nature.com/articles/\(articleID).pdf")
     }
 
     // MARK: - eLife official article API

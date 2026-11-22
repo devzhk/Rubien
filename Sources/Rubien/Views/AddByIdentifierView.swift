@@ -95,7 +95,9 @@ struct AddByIdentifierView: View {
 
             if let ref = fetchedReference {
                 verifiedCard(
-                    title: String(localized: "Verified:", bundle: .module),
+                    title: ref.verificationStatus == .verifiedManual
+                        ? String(localized: "addByIdentifier.authorless.cardTitle", bundle: .module)
+                        : String(localized: "Verified:", bundle: .module),
                     reference: ref
                 )
 
@@ -183,6 +185,13 @@ struct AddByIdentifierView: View {
                 Text(reference.authors.displayString)
                     .lineLimit(2)
                     .truncationMode(.tail)
+            } else {
+                Label {
+                    Text("addByIdentifier.authorless.notice", bundle: .module)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
             }
             if let pub = publicationLine(for: reference) {
                 Text(pub)
@@ -264,11 +273,10 @@ struct AddByIdentifierView: View {
         let outcome = await resolver.resolveManualEntry(text)
         guard !Task.isCancelled else { return }
         resolvedInput = text
-        preferredPDFURL = outcome.preferredPDFURL
-        switch outcome.result {
-        case .verified(let envelope):
-            fetchedReference = envelope.reference
-        case .candidate, .blocked, .seedOnly, .rejected:
+        preferredPDFURL = outcome.importablePDFURL
+        if let reference = outcome.importableReference(reviewedBy: "add-by-identifier") {
+            fetchedReference = reference
+        } else {
             pendingResolution = outcome.result
         }
     }

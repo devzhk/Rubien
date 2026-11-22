@@ -251,7 +251,7 @@ public enum MetadataFetcher {
     }
 
     /// Clean and extract DOI from various formats (URL, bare DOI, etc.)
-    private static func cleanDOI(_ input: String) -> String? {
+    static func cleanDOI(_ input: String) -> String? {
         var text = input
         // Handle doi.org URLs
         if let range = text.range(of: "doi.org/") {
@@ -1548,8 +1548,18 @@ public enum MetadataFetcher {
     /// Existing callers of `fetch(from:)` see no change; the CLI's resolver-add
     /// path uses this entry point so it can forward the URL to
     /// `PDFDownloadService.downloadPDF(overrideURL:)`.
+    ///
+    /// - Parameter acceptingAuthorlessPaperURL: return a paper URL whose page
+    ///   and CrossRef record list no authors (an unsigned item such as a
+    ///   Nature Research Highlight) instead of throwing. Only for callers whose
+    ///   invocation is itself the user's confirmation of the record.
     public static func fetchWithScrapedPDFURL(
-        from text: String
+        from text: String,
+        acceptingAuthorlessPaperURL: Bool = false,
+        paperURLSession: URLSession = .shared,
+        crossrefFetcher: @Sendable (String) async throws -> Reference = {
+            try await MetadataFetcher.fetchFromDOI($0)
+        }
     ) async throws -> (Reference, scrapedPDFURL: String?) {
         guard let identifier = extractIdentifier(from: text) else {
             throw FetchError.unrecognizedIdentifier
@@ -1568,14 +1578,22 @@ public enum MetadataFetcher {
             return (try await fetchFromPMCID(pmcid), nil)
         case .paperURL(let url):
             do {
-                let outcome = try await PaperURLResolver.resolve(url)
+                let outcome = try await PaperURLResolver.resolve(
+                    url,
+                    session: paperURLSession,
+                    crossrefFetcher: crossrefFetcher
+                )
                 return (outcome.reference, outcome.scrapedPDFURL)
+            } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let reference, let scrapedPDFURL)
+                where acceptingAuthorlessPaperURL {
+                return (reference, scrapedPDFURL)
             } catch PaperURLResolver.ResolveError.noAuthorsAvailable {
                 // The Mac app routes no-author through MetadataResolver's catch handler
-                // which produces a .candidate envelope for user review. CLI / direct
-                // callers of fetch() have no candidate channel — throw a typed error
-                // so they don't silently save a no-author Reference (the schema accepts
-                // empty authors as TEXT NOT NULL DEFAULT "", so nothing rejects it).
+                // which produces a .candidate envelope for user review. Direct callers
+                // of fetch() that have not opted in have no candidate channel — throw a
+                // typed error so they don't silently save a no-author Reference (the
+                // schema accepts empty authors as TEXT NOT NULL DEFAULT "", so nothing
+                // rejects it).
                 throw FetchError.unsupported(
                     "Paper URL resolved but no authors were found. Review the page or paste a DOI."
                 )
