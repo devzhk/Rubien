@@ -883,5 +883,26 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.9</title>
+            <description sparkle:format="plain-text"><![CDATA[• Attach a paper's supplementary material from an Assistant answer: the document card adds the file to the paper already in your library, with the Assistant's suggested paper preselected, instead of creating a second reference.
+• ⌘F can search just the current view. In a saved view with a tag or filters, choose that view or the whole library; the view's filters apply to the results.
+• Choosing a search result now scrolls the library list to it and selects it.
+• Import unsigned Nature pieces, such as Research Highlights, as papers. The browser extension also downloads their PDF with your signed-in session.
+• Accented author names on publisher pages, such as "Stéfan J. van der Walt", no longer break into extra authors.
+• Crossref author names with initials or a short first name, such as "R. Abbott" or "Ian Goodfellow", keep first and last names in the right order.
+• Supplementary PDFs from NeurIPS, PMLR, and CVF are imported as files instead of being mistaken for the paper.
+• rubien-cli and MCP: attachment add accepts HTTP(S) file URLs and an optional display name.]]></description>
+            <pubDate>Sun, 22 Nov 2026 06:19:41 +0000</pubDate>
+            <sparkle:version>60</sparkle:version>
+            <sparkle:shortVersionString>0.8.9</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.9/Rubien-0.8.9.dmg"
+                sparkle:edSignature="d0s1G6CSsG4ZnH3mbEuGPOgSOKnSZ2aTO8XjlZT5bssX2T7bWdaFVWxV9y+Scs8t9kYnpGMm5K4zogjkafKGDQ=="
+                length="19355535"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
