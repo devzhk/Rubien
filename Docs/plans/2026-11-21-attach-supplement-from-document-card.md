@@ -3,7 +3,11 @@
 **Date:** 2026-11-21
 **Status:** Design approved 2026-11-21 (decisions in §9). Phases 1 and 2
 implemented with focused tests. The CLI URL attach was smoke-tested against a
-loopback server. The chooser sheet has not yet been checked on screen. Surfaces
+loopback server. On screen (Home, isolated preview, scratch library, a live
+Claude turn): the agent set `supplementOf`, the sheet preselected "Suggested by
+the Assistant", Attach and Already attached worked, Open showed the attachment
+reader, Details listed the file, and Continue… opened Add Reference with the
+URL. The reader-chat "Current paper" path is covered only by unit tests. Surfaces
 without a library database (test/debug roots, scheduled-run transcripts) keep
 today's Add Reference route.
 **Scope:** Assistant document cards and a new chooser sheet (app),
