@@ -7,7 +7,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "defuddle": "^0.18.1"
+    "defuddle": "^0.19.13"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",

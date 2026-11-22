@@ -471,7 +471,7 @@ function buildPayload(result, error) {
     title: (result && result.title) || '',
     description: (result && result.description) || '',
     // `excerpt` is a legacy alias the Swift side falls back to when
-    // `description` is absent. Defuddle 0.18.1 doesn't emit a separate
+    // `description` is absent. Defuddle 0.19.13 doesn't emit a separate
     // excerpt field, so we mirror description here.
     excerpt: (result && result.description) || '',
     author: (result && result.author) || '',
@@ -649,7 +649,7 @@ window.RubienDefuddleExtract = function RubienDefuddleExtract() {
         return;
       }
 
-      // Always prefer parseAsync (Defuddle 0.18.1 always exposes it);
+      // Always prefer parseAsync (Defuddle 0.18+ always exposes it);
       // sync .parse() is a defensive fallback for older Defuddle builds.
       if (typeof inst.parseAsync === 'function') {
         debugPost('rubien_defuddle_parse_async_begin');
